@@ -1,0 +1,32 @@
+# In scheduler/custom-scheduler-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-scheduler
+  namespace: kube-system # Deploying to kube-system is common for schedulers
+  labels:
+    app: custom-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: custom-scheduler
+  template:
+    metadata:
+      labels:
+        app: custom-scheduler
+    spec:
+      serviceAccountName: custom-scheduler-sa # Match RBAC ServiceAccount name
+      containers:
+      - name: custom-scheduler
+        # --- IMPORTANT: Update this image reference ---
+        image: gcr.io/famous-arc-457314-q8/custom-scheduler:v3 # Use the tag you just pushed
+        imagePullPolicy: Always # Ensure it pulls the latest if tag is reused
+        # Optional: Add resource requests/limits for the scheduler pod itself
+        # resources:
+        #   requests:
+        #     cpu: "100m"
+        #     memory: "100Mi"
+        #   limits:
+        #     cpu: "200m"
+        #     memory: "200Mi"

@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels: # Added top-level labels for good practice
+    app: nginx
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: nginx
+      # Removed Prometheus annotations as standard nginx image doesn't export metrics
+      # annotations:
+      #   prometheus.io/scrape: 'true' # Remove this
+      #   prometheus.io/path: '/data/metrics' # Remove this (incorrect for standard nginx)
+      #   prometheus.io/port: '80' # Remove this (incorrect for standard nginx metrics)
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:stable # <-- Updated image to a recent stable version (e.g., 1.24.x or 1.25.x)
+        # Or use image: nginx:latest
+        ports:
+        - containerPort: 80
+          name: http # Adding a port name is good practice

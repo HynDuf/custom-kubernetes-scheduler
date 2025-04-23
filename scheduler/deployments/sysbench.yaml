@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app: sysbench # Added label
+  name: sysbench-memory-test
+spec:
+  template:
+    metadata:
+      labels:
+        app: sysbench # Added label
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution: # Hard requirement
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - sleep # Match pods with the label app=sleep
+            topologyKey: "kubernetes.io/hostname" # Schedule based on node hostname
+      containers:
+      - name: sysbench
+        image: severalnines/sysbench:latest
+        command:
+        - sysbench
+        args:
+        # --test=memory deprecated, use memory directly
+        - memory
+        # Renamed flags in newer sysbench versions
+        - --memory-block-size=2G
+        - --memory-oper=read
+        - --memory-access-mode=rnd
+        - --threads=10 # Changed from --num-threads
+        - run
+      restartPolicy: Never
+  backoffLimit: 1 # Added backoff limit for the Job

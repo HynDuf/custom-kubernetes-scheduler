@@ -1,0 +1,77 @@
+apiVersion: apps/v1 # <-- Changed from extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring # Make sure you created this namespace first
+  labels:
+    name: node-exporter
+spec:
+  # Selector is required in apps/v1
+  selector:
+    matchLabels:
+      name: node-exporter # Must match the labels in the template below
+  template:
+    metadata:
+      labels:
+        name: node-exporter # These labels are used by the selector
+      annotations:
+         prometheus.io/scrape: "true"
+         prometheus.io/port: "9100"
+    spec:
+      # Tolerations might be needed if your nodes have taints (e.g., control-plane nodes)
+      # Add tolerations if node-exporter isn't scheduling on all nodes:
+      # tolerations:
+      # - key: "node-role.kubernetes.io/control-plane"
+      #   operator: "Exists"
+      #   effect: "NoSchedule"
+      # - key: "node-role.kubernetes.io/master" # Older label for control-plane
+      #   operator: "Exists"
+      #   effect: "NoSchedule"
+      hostPID: true
+      hostIPC: true
+      hostNetwork: true
+      containers:
+        - name: node-exporter
+          # Using a more recent tag might be better, but the SHA guarantees consistency
+          image: quay.io/prometheus/node-exporter:latest 
+          # Or use a tag like: image: prom/node-exporter:v1.6.1
+          securityContext:
+            # Running as privileged is common but consider if less privilege is possible
+            privileged: true
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/rootfs
+            - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/kubelet/pods)($|/)
+            - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$
+          ports:
+            - name: metrics # Adding a name is good practice
+              containerPort: 9100
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 100m # Increased slightly, 100m can be tight
+              memory: 180Mi
+            requests:
+              cpu: 10m # Increased slightly
+              memory: 180Mi
+          volumeMounts:
+            - name: proc # Mount host /proc read-only
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys # Mount host /sys read-only
+              mountPath: /host/sys
+              readOnly: true
+            - name: rootfs # Mount host / read-only
+              mountPath: /rootfs
+              readOnly: true
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: rootfs
+          hostPath:
+            path: /

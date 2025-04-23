@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: monitoring # Ensure this namespace exists
+  labels: # Added labels for good practice
+    app: prometheus-server
+  # Removed annotations as Prometheus usually scrapes pods directly, not its own service definition.
+  # annotations:
+  #   prometheus.io/scrape: 'true' # Removed
+  #   prometheus.io/path:   /      # Removed
+  #   prometheus.io/port:   '8080' # Removed
+spec:
+  selector:
+    app: prometheus-server # Must match the labels on the Prometheus pods
+  type: ClusterIP # Changed from NodePort - exposes service only within the cluster (recommended)
+  ports:
+    - name: web # Added a port name
+      port: 8080 # Service listens on this port within the cluster
+      targetPort: 9090 # Forwards traffic to container port 9090 (where Prometheus runs)
+      protocol: TCP # Explicitly state protocol (default is TCP)
+      # nodePort field removed as type is now ClusterIP

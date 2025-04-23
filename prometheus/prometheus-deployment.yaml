@@ -1,0 +1,77 @@
+apiVersion: apps/v1 # <-- Updated from extensions/v1beta1
+kind: Deployment
+metadata:
+  name: prometheus-deployment
+  namespace: monitoring # Ensure this namespace exists
+  labels: # Added top-level labels for good practice
+    app: prometheus-server
+spec:
+  replicas: 1
+  selector: # <-- Added required selector for apps/v1
+    matchLabels:
+      app: prometheus-server # Must match template labels
+  template:
+    metadata:
+      labels:
+        app: prometheus-server
+      annotations:
+        # Optional: Add scrape annotations if Prometheus should scrape itself (usually not needed)
+        # prometheus.io/scrape: 'true'
+        # prometheus.io/port: '9090'
+    spec:
+      serviceAccountName: prometheus-sa # <-- IMPORTANT: Use the dedicated Service Account created earlier
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.49.1 # <-- Updated to a recent stable version (check for latest)
+          # Or use image: prom/prometheus:latest for testing
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus/"
+            - "--web.enable-lifecycle" # Allows config reload via HTTP endpoint
+            - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+            - "--web.console.templates=/usr/share/prometheus/consoles"
+          ports:
+            - name: web # Added port name
+              containerPort: 9090
+          # --- Liveness and Readiness Probes ---
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: web # Reference port by name
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: web # Reference port by name
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          # --- Resource Requests and Limits (Adjust as needed) ---
+          resources:
+            requests:
+              cpu: 250m
+              memory: 500Mi
+            limits:
+              cpu: 1 # 1 vCPU core
+              memory: 1Gi
+          volumeMounts:
+            - name: prometheus-config-volume
+              mountPath: /etc/prometheus/
+            - name: prometheus-storage-volume
+              mountPath: /prometheus/
+      volumes:
+        - name: prometheus-config-volume
+          configMap:
+            defaultMode: 420 # Read-only permissions
+            name: prometheus-server-conf # Name of the ConfigMap created earlier
+        # --- Storage Volume ---
+        # IMPORTANT: emptyDir is ephemeral and data will be lost on pod restart/deletion.
+        # For real-world use, replace emptyDir with a PersistentVolumeClaim (PVC).
+        - name: prometheus-storage-volume
+          emptyDir: {}
+        # --- Example using PersistentVolumeClaim (Recommended) ---
+        # Create a PVC first, e.g., kubectl apply -f prometheus-pvc.yaml
+        # Then uncomment this volume definition and comment out the emptyDir above.
+        # - name: prometheus-storage-volume
+        #   persistentVolumeClaim:
+        #     claimName: prometheus-storage-pvc # Replace with your PVC name

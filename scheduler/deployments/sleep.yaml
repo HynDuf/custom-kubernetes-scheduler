@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sleep-deployment # Renamed for clarity
+  labels: # Added top-level labels
+    app: sleep
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sleep
+  template:
+    metadata:
+      labels:
+        app: sleep
+    spec:
+      # serviceAccountName: default # Usually not needed unless specific permissions required
+      terminationGracePeriodSeconds: 5 # Added for faster shutdown if needed
+      containers:
+      - name: sleep
+        image: ubuntu:latest # Using a more standard base image
+        command: ["/bin/sh", "-c", "sleep infinity"] # Standard sleep command
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            memory: "1200Mi"
+            # Optional: Add a small CPU request
+            # cpu: "50m"

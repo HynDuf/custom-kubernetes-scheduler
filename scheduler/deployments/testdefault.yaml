@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx-default # Differentiate label
+  name: testdefault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-default # Match updated label
+  template:
+    metadata:
+      labels:
+        app: nginx-default # Match updated label
+      # Removed incorrect Prometheus annotations for standard Nginx
+      # annotations:
+      #   prometheus.io/scrape: 'true'
+      #   prometheus.io/path: '/data/metrics'
+      #   prometheus.io/port: '80'
+    spec:
+      # No schedulerName here - uses default scheduler
+      containers:
+        - name: nginx
+          image: "nginx:stable-alpine" # Use recent stable image
+          ports:
+          - containerPort: 80
+            name: http

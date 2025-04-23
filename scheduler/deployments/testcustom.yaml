@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx-custom # Differentiate label
+  name: testcustom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-custom # Match updated label
+  template:
+    metadata:
+      labels:
+        app: nginx-custom # Match updated label
+      # Removed incorrect Prometheus annotations for standard Nginx
+      # annotations:
+      #  prometheus.io/scrape: 'true'
+      #  prometheus.io/path: '/data/metrics'
+      #  prometheus.io/port: '80'
+    spec:
+      schedulerName: custom-scheduler # Match const in Go code (case-sensitive)
+      containers:
+        - name: nginx
+          image: "nginx:stable-alpine" # Use recent stable image
+          ports:
+          - containerPort: 80
+            name: http
