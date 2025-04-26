@@ -18,8 +18,8 @@ data:
           severity: warning # Example severity
         annotations:
           summary: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has high memory usage"
-          # Corrected Description using / operator:
-          description: "Pod {{ $labels.pod }} is using {{ printf \"%.2f\" ($value / 1048576.0) }} MiB memory."
+          # Simplified Description showing raw value:
+          description: "Pod {{ $labels.pod }} is using {{ $value }} bytes memory."
 
   # --- Prometheus Main Configuration ---
   prometheus.yml: |-

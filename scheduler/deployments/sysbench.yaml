@@ -33,6 +33,7 @@ spec:
         - --memory-oper=read
         - --memory-access-mode=rnd
         - --threads=10 # Changed from --num-threads
+        - --time=3600
         - run
       restartPolicy: Never
   backoffLimit: 1 # Added backoff limit for the Job

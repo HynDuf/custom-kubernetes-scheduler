@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	v1 "k8s.io/api/core/v1" // Use official v1 types
 )
@@ -100,11 +101,22 @@ func getBestNodeName(ctx context.Context, compatibleNodes []v1.Node) (string, er
 		if okInstance {
 			// Extract node name part from instance label (e.g., 'gke-node-name-xyz:9100' -> 'gke-node-name-xyz')
 			// This assumes the port is always separated by ':'
-			nodeNameFromMetric = instanceLabel[:len(instanceLabel)-len(":9100")] // Adjust if port is different
-			if nodeNameFromMetric == "" { // Handle potential edge case
-				log.Printf("Warning: Could not parse node name from instance label '%s'", instanceLabel)
-				continue
-			}
+            // Check if the instance label likely contains a port (look for the last colon)
+            if portIndex := strings.LastIndex(instanceLabel, ":"); portIndex != -1 {
+                // Simple check: if the part after colon looks like a number, assume it's a port
+                if _, err := strconv.Atoi(instanceLabel[portIndex+1:]); err == nil {
+                    nodeNameFromMetric = instanceLabel[:portIndex] // Extract name before the last colon
+                    log.Printf("Parsed node name '%s' from instance label '%s'", nodeNameFromMetric, instanceLabel)
+                } else {
+                     // Found a colon, but suffix isn't a number - might be IPv6 or something else. Use as is? Or log warning?
+                     log.Printf("Warning: Instance label '%s' contains ':' but suffix is not numeric. Using full label.", instanceLabel)
+                     nodeNameFromMetric = instanceLabel // Fallback: Use the whole label if parsing fails
+                }
+            } else {
+                // No colon found, assume the whole label is the node name (like in the example API output)
+                nodeNameFromMetric = instanceLabel
+                log.Printf("Using full instance label '%s' as node name (no port detected)", instanceLabel)
+            }
 		} else if okNode {
 			nodeNameFromMetric = nodeLabel // Use 'node' label if 'instance' is missing
 		} else {
@@ -112,6 +124,10 @@ func getBestNodeName(ctx context.Context, compatibleNodes []v1.Node) (string, er
 			continue
 		}
 
+        if nodeNameFromMetric == "" { // Handle potential edge case where parsing resulted in empty string
+             log.Printf("Warning: Could not determine node name from labels: %v", m.MetricInfo)
+             continue
+        }
 		// Check if this node is one of the compatible nodes
 		if _, isCompatible := compatibleNodeMap[nodeNameFromMetric]; !isCompatible {
 			// log.Printf("Node %s from metric is not in the compatible list, skipping.", nodeNameFromMetric) // Optional: verbose logging
