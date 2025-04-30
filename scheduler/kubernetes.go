@@ -173,6 +173,18 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 
 	// 1. Get all schedulable nodes (consider Unschedulable field)
 
+	// Prepare label selector string if node selectors are present
+	var labelSelector string
+	if len(podToSchedule.Spec.NodeSelector) > 0 {
+		selector, selectorErr := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+			MatchLabels: podToSchedule.Spec.NodeSelector,
+		})
+		if selectorErr != nil {
+			return nil, fmt.Errorf("invalid node selector: %w", selectorErr)
+		}
+		labelSelector = selector.String()
+	}
+
 	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		// node name (if specified)
 		FieldSelector: func() string {
@@ -181,10 +193,7 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 			}
 			return ""
 		}(),
-		// node selector
-		LabelSelector: metav1.FormatLabelSelector(&metav1.LabelSelector{
-			MatchLabels: podToSchedule.Spec.NodeSelector,
-		}),
+		LabelSelector: labelSelector,
 	})
 	
 	if err != nil {
