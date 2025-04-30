@@ -149,17 +149,59 @@ func watchUnscheduledPods(ctx context.Context, clientset *kubernetes.Clientset) 
 	return podChannel, errChannel
 }
 
+func tolerationsTolerateTaint(tolerations []v1.Toleration, taint *v1.Taint) bool {
+	for i := range tolerations {
+		if tolerations[i].ToleratesTaint(taint) {
+			return true
+		}
+	}
+	return false
+}
+
+func tolerationsTolerateTaints(tolerations []v1.Toleration, taints []v1.Taint) bool {
+	for i := range taints {
+		if !tolerationsTolerateTaint(tolerations, &taints[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // predicateChecks finds nodes that are suitable for the pod based on resource requests.
 func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podToSchedule *v1.Pod) ([]v1.Node, error) {
 	log.Printf("Running predicate checks for pod: %s/%s", podToSchedule.Namespace, podToSchedule.Name)
 
 	// 1. Get all schedulable nodes (consider Unschedulable field)
+
 	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		// FieldSelector: "spec.unschedulable=false", // Filter out nodes marked unschedulable
+		// node name (if specified)
+		FieldSelector: func() string {
+			if podToSchedule.Spec.NodeName != "" {
+				return fields.OneTermEqualSelector("metadata.name", podToSchedule.Spec.NodeName).String()
+			}
+			return ""
+		}(),
+		// node selector
+		LabelSelector: metav1.FormatLabelSelector(&metav1.LabelSelector{
+			MatchLabels: podToSchedule.Spec.NodeSelector,
+		}),
 	})
+	
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
 	}
+	
+	// Filter nodes based on tolerations
+	// Taints and tolerations are handled in the predicate checks below
+	filteredNodes := []v1.Node{}
+	for _, node := range nodeList.Items {
+		if tolerationsTolerateTaints(podToSchedule.Spec.Tolerations, node.Spec.Taints) {
+			filteredNodes = append(filteredNodes, node)
+		}
+	}
+
+	nodeList.Items = filteredNodes
+
 	if len(nodeList.Items) == 0 {
 		return nil, errors.New("no nodes found in the cluster")
 	}
@@ -280,7 +322,7 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 		// }
 
 		_ = postEvent(ctx, clientset, podToSchedule, "FailedScheduling", failureMsg, "Warning") // Ignore event posting error
-		return nil, errors.New("no compatible nodes found after predicate checks")             // Return specific error
+		return nil, errors.New("no compatible nodes found after predicate checks")              // Return specific error
 	}
 
 	log.Printf("Found %d compatible nodes for pod %s/%s.", len(compatibleNodes), podToSchedule.Namespace, podToSchedule.Name)
