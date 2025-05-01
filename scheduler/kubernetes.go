@@ -167,6 +167,11 @@ func tolerationsTolerateTaints(tolerations []v1.Toleration, taints []v1.Taint) b
 	return true
 }
 
+func isSoftTaint(taint v1.Taint) bool {
+	// Check if the taint is a soft taint (e.g., NoSchedule or PreferNoSchedule)
+	return taint.Effect == v1.TaintEffectPreferNoSchedule
+}
+
 // predicateChecks finds nodes that are suitable for the pod based on resource requests.
 func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podToSchedule *v1.Pod) ([]v1.Node, error) {
 	log.Printf("Running predicate checks for pod: %s/%s", podToSchedule.Namespace, podToSchedule.Name)
@@ -195,21 +200,21 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 		}(),
 		LabelSelector: labelSelector,
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
 	}
-	
+
+	// comment out because taints should not be filtered out here
 	// Filter nodes based on tolerations
 	// Taints and tolerations are handled in the predicate checks below
-	filteredNodes := []v1.Node{}
-	for _, node := range nodeList.Items {
-		if tolerationsTolerateTaints(podToSchedule.Spec.Tolerations, node.Spec.Taints) {
-			filteredNodes = append(filteredNodes, node)
-		}
-	}
-
-	nodeList.Items = filteredNodes
+	// filteredNodes := []v1.Node{}
+	// for _, node := range nodeList.Items {
+	// 	if tolerationsTolerateTaints(podToSchedule.Spec.Tolerations, node.Spec.Taints) {
+	// 		filteredNodes = append(filteredNodes, node)
+	// 	}
+	// }
+	// nodeList.Items = filteredNodes
 
 	if len(nodeList.Items) == 0 {
 		return nil, errors.New("no nodes found in the cluster")
@@ -270,6 +275,7 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 	log.Printf("Pod %s/%s requires: CPU=%s, Memory=%s", podToSchedule.Namespace, podToSchedule.Name, podRequiredCpu.String(), podRequiredMemory.String())
 
 	// 5. Filter nodes based on available resources and other predicates
+	unPreferredNodes := make([]v1.Node, 0, len(nodeList.Items))
 	compatibleNodes := make([]v1.Node, 0, len(nodeList.Items))
 	fitFailures := make(map[string][]string)
 
@@ -310,11 +316,31 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 			}
 		}
 
-		// TODO: Add other predicate checks (Taints/Tolerations, Node Selectors, Affinity...)
+		// Taint checks
+		// Check if the node has any taints that the pod cannot tolerate
+		isNoPrefered := false
+
+		for _, taint := range node.Spec.Taints {
+			if !tolerationsTolerateTaint(podToSchedule.Spec.Tolerations, &taint) {
+				if isSoftTaint(taint) {
+					isNoPrefered = true
+				} else {
+					reasons = append(reasons, fmt.Sprintf("Pod does not tolerate taint %s", taint.ToString()))
+					break
+				}
+			}
+		}
 
 		if len(reasons) == 0 {
 			log.Printf("Node %s PASSED predicate checks.", node.Name)
-			compatibleNodes = append(compatibleNodes, node)
+
+			// Taint checks
+			if isNoPrefered {
+				unPreferredNodes = append(unPreferredNodes, node)
+			} else {
+				compatibleNodes = append(compatibleNodes, node)
+			}
+
 		} else {
 			log.Printf("Node %s FAILED predicate checks: %s", node.Name, strings.Join(reasons, "; "))
 			fitFailures[node.Name] = reasons
@@ -322,7 +348,7 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 	}
 
 	// 6. Handle case where no nodes are compatible
-	if len(compatibleNodes) == 0 {
+	if len(compatibleNodes) == 0 && len(unPreferredNodes) == 0 {
 		log.Printf("Pod %s/%s failed to fit on any node.", podToSchedule.Namespace, podToSchedule.Name)
 		failureMsg := fmt.Sprintf("pod (%s/%s) failed predicate checks on all nodes.", podToSchedule.Namespace, podToSchedule.Name)
 		// Optionally add details:
@@ -332,10 +358,13 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 
 		_ = postEvent(ctx, clientset, podToSchedule, "FailedScheduling", failureMsg, "Warning") // Ignore event posting error
 		return nil, errors.New("no compatible nodes found after predicate checks")              // Return specific error
+	} else if len(compatibleNodes) == 0 && len(noPreferredNodes) > 0 {
+		log.Printf("Pod %s/%s failed to find a compatible node, but fit on unpreferred nodes.", podToSchedule.Namespace, podToSchedule.Name)
+		return unPreferredNodes, nil // Return unpreferred nodes
+	} else {
+		log.Printf("Found %d compatible nodes for pod %s/%s.", len(compatibleNodes), podToSchedule.Namespace, podToSchedule.Name)
+		return compatibleNodes, nil
 	}
-
-	log.Printf("Found %d compatible nodes for pod %s/%s.", len(compatibleNodes), podToSchedule.Namespace, podToSchedule.Name)
-	return compatibleNodes, nil
 }
 
 // bindPod assigns the pod to the chosen node by creating a Binding object.
