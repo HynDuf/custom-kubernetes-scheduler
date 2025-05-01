@@ -358,7 +358,7 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 
 		_ = postEvent(ctx, clientset, podToSchedule, "FailedScheduling", failureMsg, "Warning") // Ignore event posting error
 		return nil, errors.New("no compatible nodes found after predicate checks")              // Return specific error
-	} else if len(compatibleNodes) == 0 && len(noPreferredNodes) > 0 {
+	} else if len(compatibleNodes) == 0 && len(unPreferredNodes) > 0 {
 		log.Printf("Pod %s/%s failed to find a compatible node, but fit on unpreferred nodes.", podToSchedule.Namespace, podToSchedule.Name)
 		return unPreferredNodes, nil // Return unpreferred nodes
 	} else {
