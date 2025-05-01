@@ -94,8 +94,8 @@ func schedulePod(ctx context.Context, clientset *kubernetes.Clientset, pod *v1.P
 // scheduleAllUnscheduled is used by the (now likely inactive) reconcile loop.
 // Kept for reference.
 func scheduleAllUnscheduled(ctx context.Context, clientset *kubernetes.Clientset) error {
-	processorLock.Lock() // Ensure only one reconciliation runs at a time
-	defer processorLock.Unlock()
+	// processorLock.Lock() // Ensure only one reconciliation runs at a time
+	// defer processorLock.Unlock()
 
 	log.Println("Running scheduleAllUnscheduled reconciliation...")
 	// List unscheduled pods assigned to this scheduler
