@@ -167,10 +167,24 @@ func tolerationsTolerateTaints(tolerations []v1.Toleration, taints []v1.Taint) b
 	return true
 }
 
-func isSoftTaint(taint v1.Taint) bool {
-	// Check if the taint is a soft taint (e.g., NoSchedule or PreferNoSchedule)
-	return taint.Effect == v1.TaintEffectPreferNoSchedule
+// needReschedule checks if the node's taints have changed 
+// and returns true if rescheduling is needed.
+func needReschedule(oldNode, newNode *v1.Node) bool {
+	// Check if the node's taints have changed
+	if len(oldNode.Spec.Taints) != len(newNode.Spec.Taints) {
+		return true // Taints changed, reschedule needed
+	}
+
+	for i := range oldNode.Spec.Taints {
+		if oldNode.Spec.Taints[i].Key != newNode.Spec.Taints[i].Key ||
+			oldNode.Spec.Taints[i].Value != newNode.Spec.Taints[i].Value ||
+			oldNode.Spec.Taints[i].Effect != newNode.Spec.Taints[i].Effect {
+			return true // Taint changed, reschedule needed
+		}
+	}
+	return false // No changes detected, no reschedule needed
 }
+
 
 // predicateChecks finds nodes that are suitable for the pod based on resource requests.
 func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podToSchedule *v1.Pod) ([]v1.Node, error) {
@@ -322,7 +336,7 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 
 		for _, taint := range node.Spec.Taints {
 			if !tolerationsTolerateTaint(podToSchedule.Spec.Tolerations, &taint) {
-				if isSoftTaint(taint) {
+				if taint.Effect == v1.TaintEffectPreferNoSchedule {
 					isNoPrefered = true
 				} else {
 					reasons = append(reasons, fmt.Sprintf("Pod does not tolerate taint %s", taint.ToString()))
@@ -358,7 +372,7 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 
 		_ = postEvent(ctx, clientset, podToSchedule, "FailedScheduling", failureMsg, "Warning") // Ignore event posting error
 		return nil, errors.New("no compatible nodes found after predicate checks")              // Return specific error
-	} else if len(compatibleNodes) == 0 && len(unPreferredNodes) > 0 {
+	} else if len(compatibleNodes) == 0 && len(unPreferredNodes	) > 0 {
 		log.Printf("Pod %s/%s failed to find a compatible node, but fit on unpreferred nodes.", podToSchedule.Namespace, podToSchedule.Name)
 		return unPreferredNodes, nil // Return unpreferred nodes
 	} else {
