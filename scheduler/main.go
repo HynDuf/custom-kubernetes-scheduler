@@ -59,6 +59,14 @@ func main() {
 		// DeleteFunc: scheduler.handleNodeDelete,
 	})
 
+	// Wating for cache sync
+	go informerFactory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), nodeInformer.HasSynced) {
+		log.Fatalf("Timed out waiting for node informer sync")
+	}
+
+	log.Println("Node informer synced")
+
 	// Start watching for unscheduled pods assigned to this scheduler
 	podCh, errCh := watchUnscheduledPods(ctx, clientset)
 
