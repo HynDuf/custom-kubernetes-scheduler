@@ -10,6 +10,9 @@ import (
 	"time" // Added for delays
 
 	// "k8s.io/client-go/kubernetes" // Already imported via other files if needed standalone
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/tools/cache"
 )
 
 // Ensure SchedulerName matches the one in kubernetes.go and YAMLs
@@ -38,6 +41,31 @@ func main() {
 		log.Printf("Received shutdown signal: %v. Cancelling context...", sig)
 		cancel() // Trigger shutdown for all goroutines using ctx
 	}()
+
+	informerFactory := informers.NewSharedInformerFactory(clientset, 0)
+
+	// Node Informer
+	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
+	nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		// AddFunc:    scheduler.handleNodeAdd,
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldNode := oldObj.(*v1.Node)
+			newNode := newObj.(*v1.Node)
+			if needReschedule(oldNode, newNode) {
+				log.Println("Node changed, requeuing pending pods...")
+				scheduleAllUnscheduled(ctx, clientset) // Requeue all pending pods for scheduling
+			}
+		},
+		// DeleteFunc: scheduler.handleNodeDelete,
+	})
+
+	// Wating for cache sync
+	go informerFactory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), nodeInformer.HasSynced) {
+		log.Fatalf("Timed out waiting for node informer sync")
+	}
+
+	log.Println("Node informer synced")
 
 	// Start watching for unscheduled pods assigned to this scheduler
 	podCh, errCh := watchUnscheduledPods(ctx, clientset)
