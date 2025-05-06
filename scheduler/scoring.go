@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io" // Import for io.ReadAll
 	"log"
+	"math"
 	"net/http"
+	"net/url" // Import for url.Parse and url.Values
 	"sort"
 	"strconv"
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/selection" // For NodeSelectorRequirementsAsSelector
+	// client-go kubernetes not directly needed here unless for a K8s client
 )
 
 // ScoringConfig holds the weights for different scoring metrics.
@@ -32,10 +36,13 @@ type NodeScore struct {
 	TotalScore    float64
 }
 
-// Prometheus metric response structure (reused from getBestNodeName)
+// Prometheus metric response structure
 type MetricResponse struct {
 	Status string `json:"status"`
 	Data   Data   `json:"data"`
+	// For error responses from Prometheus
+	ErrorType string `json:"errorType,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type Data struct {
@@ -49,138 +56,185 @@ type Result struct {
 }
 
 const (
-	prometheusService     = "http://prometheus-service.monitoring.svc.cluster.local:8080"
-	memQueryTemplate      = "/api/v1/query?query=node_memory_MemAvailable_bytes"
-	cpuIdleQueryTemplate  = "/api/v1/query?query=avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))" // Avg Idle Cores
-	maxScore         int = 10
-	minScore         int = 0
+	prometheusService = "http://prometheus-service.monitoring.svc.cluster.local:8080"
+	// PromQL queries (without the /api/v1/query?query= part)
+	memPromQL           = "node_memory_MemAvailable_bytes"
+	cpuIdlePromQL       = `avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))` // Avg Idle Cores
+	maxScore      int   = 10
+	minScore      int   = 0
 )
 
-// Function to query Prometheus
-func queryPrometheus(ctx context.Context, query string) (*MetricResponse, error) {
-	queryURL := prometheusService + query
-	log.Printf("Querying Prometheus: %s", queryURL)
+// queryPrometheus sends a PromQL query to Prometheus and parses the response.
+// promQL should be the raw PromQL string (e.g., "node_memory_MemAvailable_bytes").
+func queryPrometheus(ctx context.Context, promQL string) (*MetricResponse, error) {
+	baseAPIURL := prometheusService + "/api/v1/query"
 
-	req, err := http.NewRequestWithContext(ctx, "GET", queryURL, nil)
+	// Prepare URL with properly encoded query parameter
+	parsedURL, err := url.Parse(baseAPIURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create prometheus request: %w", err)
+		// This should not happen with a hardcoded baseAPIURL
+		log.Printf("FATAL: Failed to parse base Prometheus URL '%s': %v", baseAPIURL, err)
+		return nil, fmt.Errorf("internal error parsing prometheus base url: %w", err)
+	}
+	queryParams := parsedURL.Query()
+	queryParams.Set("query", promQL)
+	parsedURL.RawQuery = queryParams.Encode() // This correctly URL-encodes the promQL string
+
+	fullURL := parsedURL.String()
+	log.Printf("Querying Prometheus: %s", fullURL) // Log the fully constructed and encoded URL
+
+	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create prometheus request for %s: %w", promQL, err)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query prometheus: %w", err)
+		return nil, fmt.Errorf("failed to query prometheus for %s: %w", promQL, err)
 	}
 	defer resp.Body.Close()
 
+	bodyBytes, readErr := io.ReadAll(resp.Body) // Read the body ONCE
+	if readErr != nil {
+		log.Printf("Prometheus query for '%s' returned status %s. Failed to read response body: %v", promQL, resp.Status, readErr)
+		return nil, fmt.Errorf("prometheus query for '%s' failed with status %s and unreadable body", promQL, resp.Status)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		// Attempt to read body for more info
-		bodyBytes, _ := json.Marshal(resp.Body) // Read body even on error
-		log.Printf("Prometheus returned non-OK status: %s. Body: %s", resp.Status, string(bodyBytes))
-		return nil, fmt.Errorf("prometheus query failed with status: %s", resp.Status)
+		// Log the raw body for non-OK responses
+		log.Printf("Prometheus query for '%s' returned non-OK status: %s. Raw Body: %s", promQL, resp.Status, string(bodyBytes))
+		// Attempt to parse as MetricResponse anyway, as Prometheus might still send structured error
+		var metrics MetricResponse
+		if unmarshalErr := json.Unmarshal(bodyBytes, &metrics); unmarshalErr == nil && metrics.Error != "" {
+			return nil, fmt.Errorf("prometheus query for '%s' failed with status %s: %s (%s)", promQL, resp.Status, metrics.Error, metrics.ErrorType)
+		}
+		return nil, fmt.Errorf("prometheus query for '%s' failed with status %s", promQL, resp.Status)
 	}
 
 	var metrics MetricResponse
-	decoder := json.NewDecoder(resp.Body)
-	err = decoder.Decode(&metrics)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode prometheus response: %w", err)
+	if err := json.Unmarshal(bodyBytes, &metrics); err != nil {
+		log.Printf("Error decoding Prometheus response for '%s'. Raw Body: %s", promQL, string(bodyBytes))
+		return nil, fmt.Errorf("failed to decode prometheus response for '%s': %w", promQL, err)
 	}
 
 	if metrics.Status != "success" {
-		log.Printf("Prometheus query status was not 'success': %s", metrics.Status)
-		return nil, fmt.Errorf("prometheus query status indicates failure: %s", metrics.Status)
+		log.Printf("Prometheus query for '%s' status was not 'success': %s. ErrorType: %s, Error: %s. Full Response: %+v",
+			promQL, metrics.Status, metrics.ErrorType, metrics.Error, metrics)
+		return nil, fmt.Errorf("prometheus query for '%s' status indicates failure: %s (%s: %s)", promQL, metrics.Status, metrics.ErrorType, metrics.Error)
 	}
 
-	log.Printf("Prometheus query '%s' returned %d results.", query, len(metrics.Data.Results))
+	log.Printf("Prometheus query for '%s' returned %d results.", promQL, len(metrics.Data.Results))
 	return &metrics, nil
 }
 
 // Parses the 'instance' or 'node' label from Prometheus result to get the k8s node name.
-// Handles potential ports like ":9100".
 func getNodeNameFromMetric(metricInfo map[string]string) (string, error) {
+	// Priority: 'instance', then 'node'
+	// The Prometheus relabeling for 'kubernetes-pods' job in your config-map.yaml
+	// sets `target_label: instance` from `__meta_kubernetes_pod_node_name`.
+	// So, 'instance' should be the Kubernetes node name.
 	instanceLabel, okInstance := metricInfo["instance"]
-	nodeLabel, okNode := metricInfo["node"]
+	nodeLabel, okNode := metricInfo["node"] // Fallback if 'instance' is missing
 
-	var nodeNameFromMetric string
-	rawLabel := ""
+	var nodeNameSource string
+	var rawLabelValue string
 
-	if okInstance {
-		rawLabel = instanceLabel
-		nodeNameFromMetric = parseInstanceLabel(instanceLabel)
-	} else if okNode {
-		rawLabel = nodeLabel
-		nodeNameFromMetric = parseInstanceLabel(nodeLabel) // Also parse node label in case it has port
+	if okInstance && instanceLabel != "" {
+		nodeNameSource = "instance"
+		rawLabelValue = instanceLabel
+	} else if okNode && nodeLabel != "" {
+		nodeNameSource = "node"
+		rawLabelValue = nodeLabel
 	} else {
-		return "", fmt.Errorf("metric result missing 'instance' or 'node' label: %v", metricInfo)
+		return "", fmt.Errorf("metric result missing a usable 'instance' or 'node' label: %v", metricInfo)
 	}
 
-	if nodeNameFromMetric == "" {
-		return "", fmt.Errorf("could not determine node name from labels (raw: '%s'): %v", rawLabel, metricInfo)
+	// The 'instance' label (from __meta_kubernetes_pod_node_name) should be the node name directly.
+	// It might sometimes include a port if the relabeling is different or from another job.
+	// parseInstanceLabel will strip the port if it looks like one.
+	parsedNodeName := parseInstanceLabel(rawLabelValue)
+
+	if parsedNodeName == "" {
+		return "", fmt.Errorf("could not determine node name from label '%s' (value: '%s'): %v", nodeNameSource, rawLabelValue, metricInfo)
 	}
-	return nodeNameFromMetric, nil
+	// log.Printf("Debug: getNodeNameFromMetric: label '%s', value '%s', parsed '%s'", nodeNameSource, rawLabelValue, parsedNodeName)
+	return parsedNodeName, nil
 }
 
 // Helper to parse instance/node label, removing port if present
 func parseInstanceLabel(label string) string {
 	if portIndex := strings.LastIndex(label, ":"); portIndex != -1 {
-		// Simple check: if the part after colon looks like a number, assume it's a port
-		if _, err := strconv.Atoi(label[portIndex+1:]); err == nil {
-			return label[:portIndex] // Extract name before the last colon
+		// Check if the part after colon is purely numeric (a port)
+		potentialPort := label[portIndex+1:]
+		if _, err := strconv.Atoi(potentialPort); err == nil {
+			// It's a numeric port, strip it
+			return label[:portIndex]
 		}
-		// Else: Found a colon, but suffix isn't a number (IPv6?). Return full label.
+		// If not purely numeric, it might be part of an IPv6 address or other format.
+		// In such cases, it's safer to return the original label, assuming it's the intended identifier.
+		// log.Printf("Debug: parseInstanceLabel: found colon in '%s', but suffix '%s' is not a simple port. Returning full label.", label, potentialPort)
+		return label
 	}
 	// No colon found, assume the whole label is the node name
 	return label
 }
 
 // Fetches Memory and CPU metrics for the given compatible nodes.
-// Returns maps: nodeName -> value
 func fetchNodeMetrics(ctx context.Context, compatibleNodeNames map[string]struct{}) (map[string]float64, map[string]float64, error) {
 	memValues := make(map[string]float64)
 	cpuValues := make(map[string]float64) // Idle cores
 
 	// Fetch Memory
-	memMetrics, err := queryPrometheus(ctx, memQueryTemplate)
+	memMetrics, err := queryPrometheus(ctx, memPromQL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed fetching memory metrics: %w", err)
-	}
-	for _, m := range memMetrics.Data.Results {
-		nodeName, err := getNodeNameFromMetric(m.MetricInfo)
-		if err != nil {
-			log.Printf("Skipping memory metric: %v", err)
-			continue
+		// Log details, but allow scheduler to proceed if one metric type fails, scoring with 0 for that metric.
+		log.Printf("Warning: Failed fetching memory metrics, they will be scored as 0: %v", err)
+	} else {
+		for _, m := range memMetrics.Data.Results {
+			nodeName, errName := getNodeNameFromMetric(m.MetricInfo)
+			if errName != nil {
+				log.Printf("Skipping memory metric due to name parsing error: %v. Metric: %v", errName, m.MetricInfo)
+				continue
+			}
+			if _, isCompatible := compatibleNodeNames[nodeName]; !isCompatible {
+				// log.Printf("Debug: Node '%s' from memory metric not in compatible list. Skipping.", nodeName)
+				continue
+			}
+			val, errVal := parseMetricValue(m.MetricValue)
+			if errVal != nil {
+				log.Printf("Skipping memory metric for node %s due to value parsing error: %v", nodeName, errVal)
+				continue
+			}
+			memValues[nodeName] = val
 		}
-		if _, isCompatible := compatibleNodeNames[nodeName]; !isCompatible {
-			continue // Ignore nodes not in the compatible list
-		}
-		val, err := parseMetricValue(m.MetricValue)
-		if err != nil {
-			log.Printf("Skipping memory metric for node %s: %v", nodeName, err)
-			continue
-		}
-		memValues[nodeName] = val
 	}
 
 	// Fetch CPU Idle
-	cpuMetrics, err := queryPrometheus(ctx, cpuIdleQueryTemplate)
+	cpuMetrics, err := queryPrometheus(ctx, cpuIdlePromQL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed fetching CPU metrics: %w", err)
+		log.Printf("Warning: Failed fetching CPU metrics, they will be scored as 0: %v", err)
+	} else {
+		for _, m := range cpuMetrics.Data.Results {
+			nodeName, errName := getNodeNameFromMetric(m.MetricInfo)
+			if errName != nil {
+				log.Printf("Skipping CPU metric due to name parsing error: %v. Metric: %v", errName, m.MetricInfo)
+				continue
+			}
+			if _, isCompatible := compatibleNodeNames[nodeName]; !isCompatible {
+				// log.Printf("Debug: Node '%s' from CPU metric not in compatible list. Skipping.", nodeName)
+				continue
+			}
+			val, errVal := parseMetricValue(m.MetricValue)
+			if errVal != nil {
+				log.Printf("Skipping CPU metric for node %s due to value parsing error: %v", nodeName, errVal)
+				continue
+			}
+			cpuValues[nodeName] = val
+		}
 	}
-	for _, m := range cpuMetrics.Data.Results {
-		nodeName, err := getNodeNameFromMetric(m.MetricInfo)
-		if err != nil {
-			log.Printf("Skipping cpu metric: %v", err)
-			continue
-		}
-		if _, isCompatible := compatibleNodeNames[nodeName]; !isCompatible {
-			continue // Ignore nodes not in the compatible list
-		}
-		val, err := parseMetricValue(m.MetricValue)
-		if err != nil {
-			log.Printf("Skipping cpu metric for node %s: %v", nodeName, err)
-			continue
-		}
-		cpuValues[nodeName] = val
+	if len(memValues) == 0 && len(cpuValues) == 0 && (memMetrics == nil || cpuMetrics == nil) {
+		// Both metric fetches failed completely
+		return nil, nil, fmt.Errorf("all node metric fetches failed (memory and CPU)")
 	}
 
 	return memValues, cpuValues, nil
@@ -204,69 +258,65 @@ func parseMetricValue(metricValue []interface{}) (float64, error) {
 
 // Normalizes a value to a 0-10 scale based on the max value found.
 func normalizeScore(value, maxValue float64) float64 {
-	if maxValue <= 0 || value <= 0 { // Avoid division by zero and negative scores
+	if maxValue <= 1e-9 { // Avoid division by zero or very small numbers, treat as min score
+		return float64(minScore)
+	}
+	if value < 0 { // If value is negative (e.g. bad metric data), give min score
 		return float64(minScore)
 	}
 	score := (value / maxValue) * float64(maxScore)
-	if score < float64(minScore) {
-		return float64(minScore)
-	}
-	if score > float64(maxScore) {
-		return float64(maxScore)
-	}
-	return score
+	return math.Max(float64(minScore), math.Min(score, float64(maxScore))) // Clamp between minScore and maxScore
 }
 
 // Calculate the affinity score bonus for a node based on pod preferences.
-// Score is the sum of weights of matching preferences.
 func calculateAffinityScore(node *v1.Node, pod *v1.Pod) (float64, error) {
 	affinity := pod.Spec.Affinity
-	if affinity == nil || affinity.NodeAffinity == nil || affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution == nil {
+	if affinity == nil || affinity.NodeAffinity == nil || len(affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution) == 0 {
 		return 0, nil // No preference defined
 	}
 
 	var totalPreferenceScore int32 = 0
-	nodeLabels := labels.Set(node.Labels) // Use labels.Set for matching
+	nodeLabelsSet := labels.Set(node.Labels)
 
 	for _, preferredTerm := range affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
-		if preferredTerm.Preference.MatchExpressions == nil && preferredTerm.Preference.MatchFields == nil {
-			continue // Skip empty preference term
-		}
-
-		// TODO: Implement MatchFields if needed (less common for preferred)
+		// Skip if the preference term itself is nil (should not happen with valid K8s spec)
+		// if preferredTerm.Preference == nil { continue }
 
 		// MatchExpressions logic
 		if preferredTerm.Preference.MatchExpressions != nil {
 			nodeSelector, err := NodeSelectorRequirementsAsSelector(preferredTerm.Preference.MatchExpressions)
 			if err != nil {
 				log.Printf("Warning: Failed to parse MatchExpressions for node %s, pod %s/%s: %v", node.Name, pod.Namespace, pod.Name, err)
-				continue // Skip this term on error
+				continue
 			}
-
-			if nodeSelector.Matches(nodeLabels) {
-				log.Printf("Node %s matched preferred affinity term (weight %d) for pod %s/%s", node.Name, preferredTerm.Weight, pod.Namespace, pod.Name)
+			if nodeSelector.Matches(nodeLabelsSet) {
 				totalPreferenceScore += preferredTerm.Weight
 			}
 		}
+		// MatchFields logic (less common for preferred node affinity)
+		if preferredTerm.Preference.MatchFields != nil {
+			// Kubernetes' default scheduler doesn't support MatchFields for NodeAffinity.
+			// Implementing this would require evaluating fields on the node object.
+			// For now, we can log a warning or ignore.
+			log.Printf("Warning: MatchFields in preferredNodeAffinity is not fully supported by this custom scheduler. Node: %s, Pod: %s/%s", node.Name, pod.Namespace, pod.Name)
+		}
 	}
 
-	// Normalize the affinity score (0-10)?
-	// Max possible score is sum of all weights (could be > 100).
-	// Simple approach: scale linearly based on a max expected sum (e.g., 100).
-	// Or just use the raw sum divided by 10 for rough alignment with 0-10 resource scores.
-	scaledScore := float64(totalPreferenceScore) / 10.0 // Scale to roughly 0-10 range
+	// Normalize the affinity score (0-10). Max possible raw score could be high (e.g. 100 * num_terms).
+	// Simple scaling: if max possible weight per term is 100, and we expect 1-2 terms usually.
+	// Let's scale assuming a max sum of 100 gives full score (10).
+	// This makes the weight parameter more intuitive (1.0 weight means affinity bonus can be up to 10).
+	scaledScore := (float64(totalPreferenceScore) / 100.0) * float64(maxScore)
+	scaledScore = math.Max(0, math.Min(scaledScore, float64(maxScore))) // Clamp 0-10
 
-	// Cap the score
-	if scaledScore > float64(maxScore) {
-		scaledScore = float64(maxScore)
+	if totalPreferenceScore > 0 {
+		log.Printf("Node %s affinity score (raw sum: %d, scaled 0-10: %.2f)", node.Name, totalPreferenceScore, scaledScore)
 	}
-
-	log.Printf("Node %s affinity score (scaled 0-10): %.2f (raw sum: %d)", node.Name, scaledScore, totalPreferenceScore)
 	return scaledScore, nil
 }
 
 // NodeSelectorRequirementsAsSelector converts the []NodeSelectorRequirement api type into a struct that implements
-// labels.Selector. Helper function similar to metav1.LabelSelectorAsSelector
+// labels.Selector.
 func NodeSelectorRequirementsAsSelector(nsm []v1.NodeSelectorRequirement) (labels.Selector, error) {
 	if len(nsm) == 0 {
 		return labels.Nothing(), nil
@@ -299,58 +349,61 @@ func NodeSelectorRequirementsAsSelector(nsm []v1.NodeSelectorRequirement) (label
 	return selector, nil
 }
 
-
 // ScoreNodes calculates scores for all compatible nodes and returns the name of the best node.
 func ScoreNodes(ctx context.Context, compatibleNodes []v1.Node, pod *v1.Pod, config ScoringConfig) (string, error) {
 	if len(compatibleNodes) == 0 {
 		return "", errors.New("no compatible nodes to score")
 	}
 
-	// Create map for quick lookup
 	compatibleNodeMap := make(map[string]struct{})
 	for _, node := range compatibleNodes {
 		compatibleNodeMap[node.Name] = struct{}{}
 	}
 
-	// Fetch metrics from Prometheus
 	memValues, cpuValues, err := fetchNodeMetrics(ctx, compatibleNodeMap)
 	if err != nil {
-		log.Printf("Warning: Failed to fetch some node metrics: %v. Scoring may be incomplete.", err)
-		// Decide whether to proceed with potentially missing data or fail
-		// For now, proceed, nodes without metrics will get score 0
-		// return "", fmt.Errorf("failed to fetch node metrics: %w", err)
+		// err is already logged by fetchNodeMetrics if specific fetches fail.
+		// If all fetches failed, fetchNodeMetrics returns an error.
+		log.Printf("Continuing scoring with potentially incomplete metrics due to: %v", err)
+		// If BOTH memValues and cpuValues are nil (total failure), then we should error out.
+		if memValues == nil && cpuValues == nil {
+			return "", fmt.Errorf("cannot score nodes, all metric fetching failed: %w", err)
+		}
 	}
 
-	// Find max values for normalization
 	maxMem := 0.0
 	maxCPU := 0.0
-	for _, node := range compatibleNodes {
-		if mem, ok := memValues[node.Name]; ok && mem > maxMem {
+	// Only iterate over nodes for which we successfully got metrics for finding max.
+	for nodeName := range compatibleNodeMap { // Iterate over names to ensure we consider all nodes
+		if mem, ok := memValues[nodeName]; ok && mem > maxMem {
 			maxMem = mem
 		}
-		if cpu, ok := cpuValues[node.Name]; ok && cpu > maxCPU {
+		if cpu, ok := cpuValues[nodeName]; ok && cpu > maxCPU {
 			maxCPU = cpu
 		}
 	}
 	log.Printf("Max values for normalization - MemAvailable: %.0f bytes, CPUIdle(avg cores): %.3f", maxMem, maxCPU)
 
-	// Calculate scores for each node
 	nodeScores := make([]NodeScore, 0, len(compatibleNodes))
 	for _, node := range compatibleNodes {
-		memVal := memValues[node.Name] // Defaults to 0 if not found
-		cpuVal := cpuValues[node.Name] // Defaults to 0 if not found
+		memVal := 0.0
+		if mv, ok := memValues[node.Name]; ok {
+			memVal = mv
+		}
+		cpuVal := 0.0
+		if cv, ok := cpuValues[node.Name]; ok {
+			cpuVal = cv
+		}
 
 		memScore := normalizeScore(memVal, maxMem)
 		cpuScore := normalizeScore(cpuVal, maxCPU)
 
-		affinityScore, err := calculateAffinityScore(&node, pod)
-		if err != nil {
-			// Log error but continue, treating affinity as 0 for this node
-			log.Printf("Warning: Failed to calculate affinity score for node %s: %v", node.Name, err)
+		affinityScore, affErr := calculateAffinityScore(&node, pod)
+		if affErr != nil {
+			log.Printf("Warning: Failed to calculate affinity score for node %s: %v. Treating as 0.", node.Name, affErr)
 			affinityScore = 0
 		}
 
-		// Combine scores with weights
 		totalScore := (config.WeightMem * memScore) + (config.WeightCPU * cpuScore) + (config.WeightAffinity * affinityScore)
 
 		log.Printf("Scores for node %s: Mem=%.2f (Val=%.0f), CPU=%.2f (Val=%.3f), Affinity=%.2f -> Total=%.2f",
@@ -366,27 +419,22 @@ func ScoreNodes(ctx context.Context, compatibleNodes []v1.Node, pod *v1.Pod, con
 	}
 
 	if len(nodeScores) == 0 {
-		// This might happen if metric fetching failed entirely and we chose to continue
-		return "", errors.New("no nodes could be scored (check metric fetching logs)")
+		return "", errors.New("no nodes could be scored (potentially all metric fetches failed or no compatible nodes)")
 	}
 
-	// Sort nodes by TotalScore descending
 	sort.Slice(nodeScores, func(i, j int) bool {
-		// Higher total score is better
 		if nodeScores[i].TotalScore != nodeScores[j].TotalScore {
 			return nodeScores[i].TotalScore > nodeScores[j].TotalScore
 		}
-		// Tie-breaking: prefer higher memory score
-		if nodeScores[i].MemScore != nodeScores[j].MemScore {
+		if nodeScores[i].MemScore != nodeScores[j].MemScore { // Tie-break on memory
 			return nodeScores[i].MemScore > nodeScores[j].MemScore
 		}
-        // Tie-breaking: prefer higher CPU score
-        return nodeScores[i].CPUScore > nodeScores[j].CPUScore
-		// Could add more tie-breakers if needed
+		return nodeScores[i].CPUScore > nodeScores[j].CPUScore // Then CPU
 	})
 
 	bestNode := nodeScores[0]
-	log.Printf("Selected best node: %s (Total Score: %.2f)", bestNode.Name, bestNode.TotalScore)
+	log.Printf("Selected best node: %s (Total Score: %.2f, MemScore: %.2f, CPUScore: %.2f, AffinityScore: %.2f)",
+		bestNode.Name, bestNode.TotalScore, bestNode.MemScore, bestNode.CPUScore, bestNode.AffinityScore)
 
 	return bestNode.Name, nil
 }
