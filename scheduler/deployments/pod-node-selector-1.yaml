@@ -3,16 +3,16 @@ apiVersion: apps/v1
    metadata:
      name: pod-node-selector-1
      labels:
-       app: nginx-ns-3
+       app: nginx-ns-1
    spec:
      replicas: 1
      selector:
        matchLabels:
-         app: nginx-ns-3
+         app: nginx-ns-1
      template:
        metadata:
          labels:
-           app: nginx-ns-3
+           app: nginx-ns-1
        spec:
          schedulerName: custom-scheduler
          nodeSelector:
