@@ -162,6 +162,9 @@ kubectl apply -f prometheus/config-map.yaml -n monitoring
 kubectl apply -f prometheus/prometheus-deployment.yaml -n monitoring
 kubectl apply -f prometheus/prometheus-service.yaml -n monitoring
 
+# See Prometheus UI
+kubectl port-forward svc/prometheus-service 9090:8080 -n monitoring
+
 # Check if there are 3 node exporters and 1 prometheus all RUNNING
 kubectl get pods -o wide -n monitoring
 
@@ -170,6 +173,9 @@ kubectl apply -f scheduler/custom-scheduler-deployment.yaml
 
 # Watch scheduler logs
 kubectl logs -n kube-system -l app=custom-scheduler -f --tail=1000
+
+kubectl apply -f scheduler/deployments/sleep.yaml
+kubectl apply -f scheduler/deployments/sysbench.yaml
 
 kubectl apply -f scheduler/deployments/testdefault.yaml
 kubectl apply -f scheduler/deployments/testcustom.yaml
