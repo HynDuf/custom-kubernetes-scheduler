@@ -2,6 +2,7 @@ package main
 
 import (
 	"context" // Add context
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -17,10 +18,8 @@ import (
 // Note: The watch-based approach in main.go makes this less critical than the original reconcile loop.
 var processorLock = &sync.Mutex{}
 
-// NOTE: The original reconcileUnscheduledPods function is less suitable for a client-go
-// watch-based approach. The main loop now handles incoming pods directly from the watch.
-// This function is kept for reference but is NOT CALLED in the updated main.go.
-func reconcileUnscheduledPods(interval int, done chan struct{}, wg *sync.WaitGroup, clientset *kubernetes.Clientset, ctx context.Context) {
+// NOTE: reconcileUnscheduledPods and monitorUnscheduledPods are kept for reference but are NOT CALLED in the updated main.go.
+func reconcileUnscheduledPods(interval int, done chan struct{}, wg *sync.WaitGroup, clientset *kubernetes.Clientset, ctx context.Context, config ScoringConfig) { // Added config
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 	defer wg.Done()
@@ -29,10 +28,10 @@ func reconcileUnscheduledPods(interval int, done chan struct{}, wg *sync.WaitGro
 		select {
 		case <-ticker.C:
 			log.Println("Reconciliation loop triggered (Note: This is likely inactive in the current main.go)")
-			// err := scheduleAllUnscheduled(ctx, clientset) // Call a function to list and schedule all
-			// if err != nil {
-			// 	log.Printf("Error during reconciliation: %v", err)
-			// }
+			err := scheduleAllUnscheduled(ctx, clientset, config) // Pass config
+			if err != nil {
+				log.Printf("Error during reconciliation: %v", err)
+			}
 		case <-done:
 			log.Println("Stopped reconciliation loop.")
 			return
@@ -40,11 +39,7 @@ func reconcileUnscheduledPods(interval int, done chan struct{}, wg *sync.WaitGro
 	}
 }
 
-// monitorUnscheduledPods is now primarily handled by the watch loop in main.go
-// This function signature is kept for reference but logic moved to main.go
 func monitorUnscheduledPods(done chan struct{}, wg *sync.WaitGroup, clientset *kubernetes.Clientset, ctx context.Context) {
-	// Original logic using watchUnscheduledPods is now integrated into main.go's select loop
-	// This function body can be removed or adapted if a separate monitoring goroutine is desired.
 	log.Println("monitorUnscheduledPods started (Note: Core logic moved to main.go)")
 	<-done // Block until done signal
 	wg.Done()
@@ -52,32 +47,42 @@ func monitorUnscheduledPods(done chan struct{}, wg *sync.WaitGroup, clientset *k
 
 }
 
-// schedulePod takes an unscheduled pod, runs predicates, selects the best node, and binds it.
-// This function is called by the main loop when a pod arrives on the channel.
-func schedulePod(ctx context.Context, clientset *kubernetes.Clientset, pod *v1.Pod) error {
-	processorLock.Lock() // Lock to prevent concurrent processing of the *same* pod if watch delivers duplicates quickly
+// schedulePod takes an unscheduled pod, runs predicates, selects the best node via scoring, and binds it.
+func schedulePod(ctx context.Context, clientset *kubernetes.Clientset, pod *v1.Pod, config ScoringConfig) error { // Added config
+	processorLock.Lock()
 	defer processorLock.Unlock()
 
 	log.Printf("Attempting to schedule pod: %s/%s", pod.Namespace, pod.Name)
 
 	// 1. Run Predicate Checks
+	// predicateChecks now correctly handles PreferNoSchedule taints, returning them
+	// if no strictly compatible nodes exist. Scoring will handle the preference.
 	compatibleNodes, err := predicateChecks(ctx, clientset, pod)
 	if err != nil {
 		// Error logging and event posting are handled within predicateChecks
 		return fmt.Errorf("predicate check failed: %w", err) // Return error to main loop
 	}
-	// predicateChecks returns an error if len(compatibleNodes) == 0
 
-	// 2. Find Best Node (Prioritize) based on Prometheus Metric
-	bestNode, err := getBestNode(ctx, compatibleNodes) // getBestNode now returns v1.Node
+	// 2. Find Best Node (Prioritize) using the new scoring logic
+	bestNode, err := getBestNode(ctx, compatibleNodes, pod, config) // Pass pod and config
 	if err != nil {
-		log.Printf("Failed to get best node for pod %s/%s via Prometheus: %v", pod.Namespace, pod.Name, err)
+		log.Printf("Failed to get best node for pod %s/%s via scoring: %v", pod.Namespace, pod.Name, err)
 		// --- Fallback Strategy ---
-		log.Printf("Falling back to scheduling pod %s/%s on the first compatible node: %s", pod.Namespace, pod.Name, compatibleNodes[0].Name)
-		bestNode = compatibleNodes[0] // Select the first compatible node
-		// If failing is preferred:
-		// _ = postEvent(ctx, clientset, pod, "FailedScheduling", fmt.Sprintf("Failed to find best node via metrics: %v", err), "Warning")
-		// return fmt.Errorf("prioritization failed: %w", err)
+		// Check if compatibleNodes has anything before trying to access [0]
+		if len(compatibleNodes) > 0 {
+			log.Printf("Falling back to scheduling pod %s/%s on the first compatible/unpreferred node: %s", pod.Namespace, pod.Name, compatibleNodes[0].Name)
+			bestNode = compatibleNodes[0] // Select the first compatible/unpreferred node
+		} else {
+			// This case should theoretically be caught by predicateChecks returning an error
+			// if no nodes (compatible or unpreferred) are found.
+			errMsg := "Scoring failed and no fallback node available (predicate checks likely failed initially)"
+			_ = postEvent(ctx, clientset, pod, "FailedScheduling", errMsg, "Warning")
+			return errors.New(errMsg)
+		}
+		// Original code:
+		// log.Printf("Failed to get best node for pod %s/%s via Prometheus: %v", pod.Namespace, pod.Name, err)
+		// log.Printf("Falling back to scheduling pod %s/%s on the first compatible node: %s", pod.Namespace, pod.Name, compatibleNodes[0].Name)
+		// bestNode = compatibleNodes[0]
 	}
 
 	// 3. Bind Pod to the Chosen Node
@@ -92,13 +97,9 @@ func schedulePod(ctx context.Context, clientset *kubernetes.Clientset, pod *v1.P
 }
 
 // scheduleAllUnscheduled is used by the (now likely inactive) reconcile loop.
-// Kept for reference.
-func scheduleAllUnscheduled(ctx context.Context, clientset *kubernetes.Clientset) error {
-	// processorLock.Lock() // Ensure only one reconciliation runs at a time
-	// defer processorLock.Unlock()
-
+// Kept for reference. Needs config passed.
+func scheduleAllUnscheduled(ctx context.Context, clientset *kubernetes.Clientset, config ScoringConfig) error { // Added config
 	log.Println("Running scheduleAllUnscheduled reconciliation...")
-	// List unscheduled pods assigned to this scheduler
 	podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", "").String(),
 	})
@@ -108,14 +109,13 @@ func scheduleAllUnscheduled(ctx context.Context, clientset *kubernetes.Clientset
 
 	processedCount := 0
 	for _, pod := range podList.Items {
-		// Must check scheduler name again here
 		if pod.Spec.SchedulerName == SchedulerName && pod.Status.Phase == v1.PodPending {
 			log.Printf("Reconciler found unscheduled pod: %s/%s", pod.Namespace, pod.Name)
-			// Use a detached context for each pod scheduling attempt within reconcile?
-			// Or use the main context? Using main context for now.
-			err := schedulePod(ctx, clientset, &pod) // Pass pointer to pod
+			// Need to handle potential concurrent modification if called often
+			// Use a copy of the pod object for scheduling attempt
+			podToSchedule := pod.DeepCopy()
+			err := schedulePod(ctx, clientset, podToSchedule, config) // Pass config and copied pod
 			if err != nil {
-				// Log error but continue processing other pods
 				log.Printf("Error scheduling pod %s/%s during reconciliation: %v", pod.Namespace, pod.Name, err)
 			} else {
 				processedCount++

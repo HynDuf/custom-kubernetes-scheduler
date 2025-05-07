@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -55,14 +57,13 @@ func watchUnscheduledPods(ctx context.Context, clientset *kubernetes.Clientset) 
 				// Watch pods in all namespaces, filter by spec.nodeName="" (unscheduled)
 				watcher, err := clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
 					FieldSelector: fields.OneTermEqualSelector("spec.nodeName", "").String(),
-					// Optional: Add LabelSelector if pods for this scheduler have specific labels
 				})
 
 				if err != nil {
 					log.Printf("Error starting pod watch: %v. Retrying in 5 seconds...", err)
 					select {
 					case errChannel <- fmt.Errorf("failed to start watch: %w", err): // Try sending non-fatal error
-					default: // Avoid blocking if channel is full
+					default:
 						log.Println("Error channel full, discarding watch start error.")
 					}
 					select {
@@ -75,7 +76,6 @@ func watchUnscheduledPods(ctx context.Context, clientset *kubernetes.Clientset) 
 				}
 
 				log.Println("Pod watch started successfully.")
-				// Process events from the watcher channel
 			processEvents:
 				for {
 					select {
@@ -85,21 +85,20 @@ func watchUnscheduledPods(ctx context.Context, clientset *kubernetes.Clientset) 
 						return
 					case event, ok := <-watcher.ResultChan():
 						if !ok {
-							// Watch channel closed, restart watch
 							log.Println("Pod watch channel closed. Restarting watch...")
 							break processEvents // Break inner loop to restart watch
 						}
 
 						switch event.Type {
-						case watch.Added:
+						case watch.Added, watch.Modified: // Handle Modified too, in case schedulerName is added later
 							pod, ok := event.Object.(*v1.Pod)
 							if !ok {
 								log.Printf("Watch event object is not a Pod: %T", event.Object)
 								continue
 							}
-							// Check if the pod is assigned to *this* scheduler and is Pending
-							if pod.Spec.SchedulerName == SchedulerName && pod.Status.Phase == v1.PodPending {
-								log.Printf("Found unscheduled pod for %s: %s/%s", SchedulerName, pod.Namespace, pod.Name)
+							// Check if the pod is assigned to *this* scheduler, is Pending, and unscheduled
+							if pod.Spec.SchedulerName == SchedulerName && pod.Spec.NodeName == "" && pod.Status.Phase == v1.PodPending {
+								log.Printf("Found unscheduled pod for %s: %s/%s (Event: %s)", SchedulerName, pod.Namespace, pod.Name, event.Type)
 								select {
 								case podChannel <- *pod: // Send a copy to the channel
 								case <-ctx.Done():
@@ -113,7 +112,13 @@ func watchUnscheduledPods(ctx context.Context, clientset *kubernetes.Clientset) 
 							errMsg := "unknown watch error"
 							if ok {
 								errMsg = status.Message
-								log.Printf("Error during pod watch: %s", errMsg)
+								log.Printf("Error during pod watch: %s (Code: %d)", errMsg, status.Code)
+								// Handle specific errors like "too old resource version" which requires restarting the watch
+								if status.Reason == metav1.StatusReasonGone || status.Code == http.StatusGone {
+                                    log.Println("Watch resource version too old, restarting watch immediately.")
+                                    watcher.Stop() // Stop current watcher
+                                    break processEvents // Restart watch loop
+                                }
 							} else {
 								log.Printf("Received unexpected error object during watch: %T", event.Object)
 								errMsg = "received unexpected error object during watch"
@@ -123,15 +128,15 @@ func watchUnscheduledPods(ctx context.Context, clientset *kubernetes.Clientset) 
 							default:
 								log.Println("Error channel full, discarding watch error.")
 							}
-							// Watcher might close after error, outer loop will restart
-							break processEvents // Break inner loop to restart watch
+							// Watcher might close after error, outer loop will restart if not handled above
+							break processEvents
 
 						case watch.Deleted:
 							pod, ok := event.Object.(*v1.Pod)
-							if ok && pod.Spec.SchedulerName == SchedulerName {
+							if ok && pod.Spec.SchedulerName == SchedulerName && pod.Spec.NodeName == "" {
 								log.Printf("Unscheduled pod %s/%s deleted.", pod.Namespace, pod.Name)
 							}
-							// Ignore Modified, Bookmark etc. for unscheduled pods
+							// Ignore Bookmark etc.
 						}
 					}
 				}
@@ -149,6 +154,7 @@ func watchUnscheduledPods(ctx context.Context, clientset *kubernetes.Clientset) 
 	return podChannel, errChannel
 }
 
+// Checks if ANY toleration tolerates the taint
 func tolerationsTolerateTaint(tolerations []v1.Toleration, taint *v1.Taint) bool {
 	for i := range tolerations {
 		if tolerations[i].ToleratesTaint(taint) {
@@ -158,6 +164,7 @@ func tolerationsTolerateTaint(tolerations []v1.Toleration, taint *v1.Taint) bool
 	return false
 }
 
+// Checks if ALL taints are tolerated by at least one toleration
 func tolerationsTolerateTaints(tolerations []v1.Toleration, taints []v1.Taint) bool {
 	for i := range taints {
 		if !tolerationsTolerateTaint(tolerations, &taints[i]) {
@@ -167,7 +174,7 @@ func tolerationsTolerateTaints(tolerations []v1.Toleration, taints []v1.Taint) b
 	return true
 }
 
-// needReschedule checks if the node's taints have changed 
+// needReschedule checks if the node's taints have changed
 // and returns true if rescheduling is needed.
 func needReschedule(oldNode, newNode *v1.Node) bool {
 	// Check if the node's taints have changed
@@ -175,89 +182,156 @@ func needReschedule(oldNode, newNode *v1.Node) bool {
 		return true // Taints changed, reschedule needed
 	}
 
-	for i := range oldNode.Spec.Taints {
-		if oldNode.Spec.Taints[i].Key != newNode.Spec.Taints[i].Key ||
-			oldNode.Spec.Taints[i].Value != newNode.Spec.Taints[i].Value ||
-			oldNode.Spec.Taints[i].Effect != newNode.Spec.Taints[i].Effect {
-			return true // Taint changed, reschedule needed
+	// More robust check needed here - order might change
+	oldTaints := make(map[string]v1.Taint)
+	for _, t := range oldNode.Spec.Taints {
+		oldTaints[t.Key+string(t.Effect)] = t // Use Key+Effect as identifier
+	}
+	newTaints := make(map[string]v1.Taint)
+	for _, t := range newNode.Spec.Taints {
+		newTaints[t.Key+string(t.Effect)] = t
+	}
+
+	if len(oldTaints) != len(newTaints) { // Should be caught by len check above, but safer
+		return true
+	}
+
+	for key, oldTaint := range oldTaints {
+		newTaint, ok := newTaints[key]
+		if !ok || oldTaint.Value != newTaint.Value { // Check if taint exists and value matches
+			return true
 		}
 	}
-	return false // No changes detected, no reschedule needed
+
+	// Also check labels relevant to affinity rules? More complex.
+	// For now, just checking taints.
+
+	return false // No relevant changes detected
 }
 
-
-// predicateChecks finds nodes that are suitable for the pod based on resource requests.
+// predicateChecks finds nodes that are suitable for the pod based on resource requests, selectors, taints etc.
+// It returns a list of nodes that pass all checks, including those with PreferNoSchedule taints.
+// The scoring phase will handle the preference.
 func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podToSchedule *v1.Pod) ([]v1.Node, error) {
 	log.Printf("Running predicate checks for pod: %s/%s", podToSchedule.Namespace, podToSchedule.Name)
 
-	// 1. Get all schedulable nodes (consider Unschedulable field)
-
-	// Prepare label selector string if node selectors are present
-	var labelSelector string
+	// 1. List potential nodes (filtering by nodeName and nodeSelector if specified)
+	listOptions := metav1.ListOptions{}
+	if podToSchedule.Spec.NodeName != "" {
+		listOptions.FieldSelector = fields.OneTermEqualSelector("metadata.name", podToSchedule.Spec.NodeName).String()
+	}
 	if len(podToSchedule.Spec.NodeSelector) > 0 {
-		selector, selectorErr := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
-			MatchLabels: podToSchedule.Spec.NodeSelector,
-		})
-		if selectorErr != nil {
-			return nil, fmt.Errorf("invalid node selector: %w", selectorErr)
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: podToSchedule.Spec.NodeSelector})
+		if err != nil {
+			return nil, fmt.Errorf("invalid node selector: %w", err)
 		}
-		labelSelector = selector.String()
+		listOptions.LabelSelector = selector.String()
 	}
 
-	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		// node name (if specified)
-		FieldSelector: func() string {
-			if podToSchedule.Spec.NodeName != "" {
-				return fields.OneTermEqualSelector("metadata.name", podToSchedule.Spec.NodeName).String()
-			}
-			return ""
-		}(),
-		LabelSelector: labelSelector,
-	})
-
+	nodeList, err := clientset.CoreV1().Nodes().List(ctx, listOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
 	}
-
-	// comment out because taints should not be filtered out here
-	// Filter nodes based on tolerations
-	// Taints and tolerations are handled in the predicate checks below
-	// filteredNodes := []v1.Node{}
-	// for _, node := range nodeList.Items {
-	// 	if tolerationsTolerateTaints(podToSchedule.Spec.Tolerations, node.Spec.Taints) {
-	// 		filteredNodes = append(filteredNodes, node)
-	// 	}
-	// }
-	// nodeList.Items = filteredNodes
-
 	if len(nodeList.Items) == 0 {
-		return nil, errors.New("no nodes found in the cluster")
+        errMsg := "no nodes found matching NodeName/NodeSelector"
+        if podToSchedule.Spec.NodeName != "" {
+             errMsg += fmt.Sprintf(" (NodeName: %s)", podToSchedule.Spec.NodeName)
+        }
+         if len(podToSchedule.Spec.NodeSelector) > 0 {
+              errMsg += fmt.Sprintf(" (NodeSelector: %v)", podToSchedule.Spec.NodeSelector)
+         }
+		_ = postEvent(ctx, clientset, podToSchedule, "FailedScheduling", errMsg, "Warning")
+		return nil, errors.New(errMsg)
 	}
 
 	// 2. Get all pods (needed to calculate current usage on nodes)
-	// Consider using ResourceVersion for consistency if needed, but adds complexity
-	podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	// TODO: Consider optimizing this if cluster is huge. Maybe only list pods relevant to candidate nodes?
+	allPodsList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list pods: %w", err)
+		return nil, fmt.Errorf("failed to list pods for resource calculation: %w", err)
 	}
 
 	// 3. Calculate current resource usage per node (REQUESTS of running/pending pods)
-	nodeUsage := make(map[string]v1.ResourceList)
+	nodeUsage := calculateNodeUsage(nodeList.Items, allPodsList.Items)
+
+	// 4. Calculate resources required by the new pod
+	podRequiredCpu, podRequiredMemory := calculatePodResourceRequests(podToSchedule)
+	log.Printf("Pod %s/%s requires: CPU=%s, Memory=%s", podToSchedule.Namespace, podToSchedule.Name, podRequiredCpu.String(), podRequiredMemory.String())
+
+	// 5. Filter nodes based on predicates
+	eligibleNodes := make([]v1.Node, 0, len(nodeList.Items)) // Includes strictly compatible + prefer-not-schedule
+	fitFailures := make(map[string][]string)
+
 	for _, node := range nodeList.Items {
+		reasons := []string{}
+		isStrictlyFit := true // Assume fit unless a hard requirement fails
+
+		// Check: Node Unschedulable
+		if node.Spec.Unschedulable {
+			reasons = append(reasons, "Node is marked unschedulable")
+			isStrictlyFit = false
+		}
+
+		// Check: Resource Availability
+		if isStrictlyFit { // Only check resources if other hard checks pass
+			cpuFit, memFit, reason := checkNodeResources(node, nodeUsage[node.Name], podRequiredCpu, podRequiredMemory)
+			if !cpuFit || !memFit {
+				reasons = append(reasons, reason)
+				isStrictlyFit = false
+			}
+		}
+
+		// Check: Taints and Tolerations
+		if isStrictlyFit {
+			passes, reason := checkNodeTaints(node, podToSchedule.Spec.Tolerations)
+			if !passes {
+				reasons = append(reasons, reason)
+				isStrictlyFit = false
+			}
+		}
+
+		// Check Required Node Affinity/Anti-Affinity (Ignoring Preferred for now - handled in scoring)
+		// TODO: Implement requiredDuringSchedulingIgnoredDuringExecution checks if needed
+
+		if isStrictlyFit {
+			log.Printf("Node %s PASSED predicate checks.", node.Name)
+			eligibleNodes = append(eligibleNodes, node)
+		} else {
+			log.Printf("Node %s FAILED predicate checks: %s", node.Name, strings.Join(reasons, "; "))
+			fitFailures[node.Name] = reasons
+		}
+	}
+
+	// 6. Handle results
+	if len(eligibleNodes) == 0 {
+		log.Printf("Pod %s/%s failed to fit on any node.", podToSchedule.Namespace, podToSchedule.Name)
+		failureMsg := fmt.Sprintf("pod (%s/%s) failed predicate checks on all nodes.", podToSchedule.Namespace, podToSchedule.Name)
+		// Optional: Add details from fitFailures
+		_ = postEvent(ctx, clientset, podToSchedule, "FailedScheduling", failureMsg, "Warning")
+		return nil, errors.New("no eligible nodes found after predicate checks")
+	}
+
+	log.Printf("Found %d eligible nodes for pod %s/%s (will be scored).", len(eligibleNodes), podToSchedule.Namespace, podToSchedule.Name)
+	return eligibleNodes, nil
+}
+
+// Helper: Calculate usage based on pod requests
+func calculateNodeUsage(nodes []v1.Node, pods []v1.Pod) map[string]v1.ResourceList {
+	nodeUsage := make(map[string]v1.ResourceList)
+	for _, node := range nodes {
 		nodeUsage[node.Name] = v1.ResourceList{
 			v1.ResourceCPU:    *resource.NewQuantity(0, resource.DecimalSI),
 			v1.ResourceMemory: *resource.NewQuantity(0, resource.BinarySI),
 		}
 	}
 
-	for _, existingPod := range podList.Items {
-		// Only consider pods assigned to a node and not in a terminal state
+	for _, existingPod := range pods {
 		if existingPod.Spec.NodeName == "" || existingPod.Status.Phase == v1.PodFailed || existingPod.Status.Phase == v1.PodSucceeded {
 			continue
 		}
 		usage, nodeExists := nodeUsage[existingPod.Spec.NodeName]
 		if !nodeExists {
-			continue // Pod running on a node not in our initial list (e.g., marked unschedulable later)
+			continue // Pod on a node not in our candidate list
 		}
 
 		for _, container := range existingPod.Spec.Containers {
@@ -274,11 +348,14 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 		}
 		nodeUsage[existingPod.Spec.NodeName] = usage
 	}
+	return nodeUsage
+}
 
-	// 4. Calculate resources required by the new pod
+// Helper: Calculate total pod resource requests
+func calculatePodResourceRequests(pod *v1.Pod) (*resource.Quantity, *resource.Quantity) {
 	podRequiredCpu := resource.NewQuantity(0, resource.DecimalSI)
 	podRequiredMemory := resource.NewQuantity(0, resource.BinarySI)
-	for _, container := range podToSchedule.Spec.Containers {
+	for _, container := range pod.Spec.Containers {
 		if cpuReq, ok := container.Resources.Requests[v1.ResourceCPU]; ok {
 			podRequiredCpu.Add(cpuReq)
 		}
@@ -286,99 +363,61 @@ func predicateChecks(ctx context.Context, clientset *kubernetes.Clientset, podTo
 			podRequiredMemory.Add(memReq)
 		}
 	}
-	log.Printf("Pod %s/%s requires: CPU=%s, Memory=%s", podToSchedule.Namespace, podToSchedule.Name, podRequiredCpu.String(), podRequiredMemory.String())
+	return podRequiredCpu, podRequiredMemory
+}
 
-	// 5. Filter nodes based on available resources and other predicates
-	unPreferredNodes := make([]v1.Node, 0, len(nodeList.Items))
-	compatibleNodes := make([]v1.Node, 0, len(nodeList.Items))
-	fitFailures := make(map[string][]string)
+// Helper: Check node resource availability against pod requests
+func checkNodeResources(node v1.Node, currentUsage v1.ResourceList, podCPU, podMem *resource.Quantity) (bool, bool, string) {
+	allocatable := node.Status.Allocatable
+	cpuFit, memFit := true, true
+	reasons := []string{}
 
-	for _, node := range nodeList.Items {
-		// Basic check: Is node marked unschedulable?
-		if node.Spec.Unschedulable {
-			fitFailures[node.Name] = append(fitFailures[node.Name], "Node is marked unschedulable")
-			continue // Skip this node early
-		}
-
-		reasons := []string{}
-		allocatable := node.Status.Allocatable
-		currentUsage := nodeUsage[node.Name]
-
-		// Check CPU
-		allocatableCpu := allocatable.Cpu()
-		currentCpuUsage := currentUsage.Cpu()
-		if allocatableCpu == nil {
-			reasons = append(reasons, "No allocatable CPU info")
-		} else {
-			availableCpu := allocatableCpu.DeepCopy()
-			availableCpu.Sub(*currentCpuUsage)
-			if availableCpu.Cmp(*podRequiredCpu) == -1 {
-				reasons = append(reasons, fmt.Sprintf("Insufficient CPU (Req: %s, Avail: %s)", podRequiredCpu.String(), availableCpu.String()))
-			}
-		}
-
-		// Check Memory
-		allocatableMem := allocatable.Memory()
-		currentMemUsage := currentUsage.Memory()
-		if allocatableMem == nil {
-			reasons = append(reasons, "No allocatable Memory info")
-		} else {
-			availableMem := allocatableMem.DeepCopy()
-			availableMem.Sub(*currentMemUsage)
-			if availableMem.Cmp(*podRequiredMemory) == -1 {
-				reasons = append(reasons, fmt.Sprintf("Insufficient Memory (Req: %s, Avail: %s)", podRequiredMemory.String(), availableMem.String()))
-			}
-		}
-
-		// Taint checks
-		// Check if the node has any taints that the pod cannot tolerate
-		isNoPrefered := false
-
-		for _, taint := range node.Spec.Taints {
-			if !tolerationsTolerateTaint(podToSchedule.Spec.Tolerations, &taint) {
-				if taint.Effect == v1.TaintEffectPreferNoSchedule {
-					isNoPrefered = true
-				} else {
-					reasons = append(reasons, fmt.Sprintf("Pod does not tolerate taint %s", taint.ToString()))
-					break
-				}
-			}
-		}
-
-		if len(reasons) == 0 {
-			log.Printf("Node %s PASSED predicate checks.", node.Name)
-
-			// Taint checks
-			if isNoPrefered {
-				unPreferredNodes = append(unPreferredNodes, node)
-			} else {
-				compatibleNodes = append(compatibleNodes, node)
-			}
-
-		} else {
-			log.Printf("Node %s FAILED predicate checks: %s", node.Name, strings.Join(reasons, "; "))
-			fitFailures[node.Name] = reasons
-		}
-	}
-
-	// 6. Handle case where no nodes are compatible
-	if len(compatibleNodes) == 0 && len(unPreferredNodes) == 0 {
-		log.Printf("Pod %s/%s failed to fit on any node.", podToSchedule.Namespace, podToSchedule.Name)
-		failureMsg := fmt.Sprintf("pod (%s/%s) failed predicate checks on all nodes.", podToSchedule.Namespace, podToSchedule.Name)
-		// Optionally add details:
-		// for nodeName, reasons := range fitFailures {
-		// 	failureMsg += fmt.Sprintf("\n Node %s: %s", nodeName, strings.Join(reasons, "; "))
-		// }
-
-		_ = postEvent(ctx, clientset, podToSchedule, "FailedScheduling", failureMsg, "Warning") // Ignore event posting error
-		return nil, errors.New("no compatible nodes found after predicate checks")              // Return specific error
-	} else if len(compatibleNodes) == 0 && len(unPreferredNodes	) > 0 {
-		log.Printf("Pod %s/%s failed to find a compatible node, but fit on unpreferred nodes.", podToSchedule.Namespace, podToSchedule.Name)
-		return unPreferredNodes, nil // Return unpreferred nodes
+	// Check CPU
+	allocatableCpu := allocatable.Cpu()
+	currentCpuUsage := currentUsage.Cpu()
+	if allocatableCpu == nil {
+		cpuFit = false
+		reasons = append(reasons, "No allocatable CPU info")
 	} else {
-		log.Printf("Found %d compatible nodes for pod %s/%s.", len(compatibleNodes), podToSchedule.Namespace, podToSchedule.Name)
-		return compatibleNodes, nil
+		availableCpu := allocatableCpu.DeepCopy()
+		availableCpu.Sub(*currentCpuUsage)
+		if availableCpu.Cmp(*podCPU) < 0 { // Use < 0 for comparison
+			cpuFit = false
+			reasons = append(reasons, fmt.Sprintf("Insufficient CPU (Req: %s, Avail: %s)", podCPU.String(), availableCpu.String()))
+		}
 	}
+
+	// Check Memory
+	allocatableMem := allocatable.Memory()
+	currentMemUsage := currentUsage.Memory()
+	if allocatableMem == nil {
+		memFit = false
+		reasons = append(reasons, "No allocatable Memory info")
+	} else {
+		availableMem := allocatableMem.DeepCopy()
+		availableMem.Sub(*currentMemUsage)
+		if availableMem.Cmp(*podMem) < 0 { // Use < 0 for comparison
+			memFit = false
+			reasons = append(reasons, fmt.Sprintf("Insufficient Memory (Req: %s, Avail: %s)", podMem.String(), availableMem.String()))
+		}
+	}
+
+	return cpuFit, memFit, strings.Join(reasons, "; ")
+}
+
+// Helper: Check if pod tolerates node taints (excluding PreferNoSchedule)
+func checkNodeTaints(node v1.Node, tolerations []v1.Toleration) (bool, string) {
+	for _, taint := range node.Spec.Taints {
+		// Ignore PreferNoSchedule taints in predicates; they are handled in scoring.
+		if taint.Effect == v1.TaintEffectPreferNoSchedule {
+			continue
+		}
+		// Check if the pod tolerates this specific taint (NoSchedule, NoExecute)
+		if !tolerationsTolerateTaint(tolerations, &taint) {
+			return false, fmt.Sprintf("Pod does not tolerate taint %s", taint.ToString())
+		}
+	}
+	return true, "" // Pod tolerates all NoSchedule/NoExecute taints
 }
 
 // bindPod assigns the pod to the chosen node by creating a Binding object.
@@ -389,7 +428,9 @@ func bindPod(ctx context.Context, clientset *kubernetes.Clientset, podToSchedule
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podToSchedule.Name,
 			Namespace: podToSchedule.Namespace,
-			// UID: types.UID(SchedulerName + "-" + string(podToSchedule.UID)), // UID not needed for binding creation
+			Annotations: map[string]string{ // Add annotation indicating custom scheduler bound it
+				"kubernetes.io/custom-scheduler": SchedulerName,
+			},
 		},
 		Target: v1.ObjectReference{
 			APIVersion: "v1",
@@ -425,7 +466,7 @@ func postEvent(ctx context.Context, clientset *kubernetes.Clientset, pod *v1.Pod
 			Name:            pod.Name,
 			UID:             pod.UID,
 			APIVersion:      "v1",
-			ResourceVersion: pod.ResourceVersion,
+			ResourceVersion: pod.ResourceVersion, // Use pod's ResourceVersion for consistency
 		},
 		Reason:  reason,
 		Message: message,
@@ -436,10 +477,18 @@ func postEvent(ctx context.Context, clientset *kubernetes.Clientset, pod *v1.Pod
 		LastTimestamp:  timestamp,
 		Count:          1,
 		Type:           eventType, // "Normal" or "Warning"
+		// Reporting fields help event correlation
+		ReportingController: SchedulerName,
+		ReportingInstance:   os.Getenv("POD_NAME"), // Get scheduler pod name if available
 	}
 
-	_, err := clientset.CoreV1().Events(pod.Namespace).Create(ctx, event, metav1.CreateOptions{})
+	// Use a context with timeout for event creation
+	eventCtx, cancel := context.WithTimeout(ctx, 10*time.Second) // 10 sec timeout for event creation
+	defer cancel()
+
+	_, err := clientset.CoreV1().Events(pod.Namespace).Create(eventCtx, event, metav1.CreateOptions{})
 	if err != nil {
+		// Log error if event creation fails (might happen under high load or network issues)
 		log.Printf("Warning: Failed to create event (Reason: %s, Pod: %s/%s): %v", reason, pod.Namespace, pod.Name, err)
 	}
 	return err // Return error, but caller might ignore it

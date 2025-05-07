@@ -22,11 +22,16 @@ spec:
         # --- IMPORTANT: Update this image reference ---
         image: gcr.io/famous-arc-457314-q8/custom-scheduler:v1 # Use the tag you just pushed
         imagePullPolicy: Always # Ensure it pulls the latest if tag is reused
-        # Optional: Add resource requests/limits for the scheduler pod itself
-        # resources:
-        #   requests:
-        #     cpu: "100m"
-        #     memory: "100Mi"
-        #   limits:
-        #     cpu: "200m"
-        #     memory: "200Mi"
+        env:
+          # --- Configurable Scoring Weights ---
+          - name: SCORE_WEIGHT_MEM
+            value: "0.6" # Default weight for available memory (0.0 to 1.0+)
+          - name: SCORE_WEIGHT_CPU
+            value: "0.4" # Default weight for available CPU (idle cores) (0.0 to 1.0+)
+          - name: SCORE_WEIGHT_AFFINITY
+            value: "1.0" # Default weight for affinity score (adjust multiplier)
+          # --- Get Pod Name for Event Reporting ---
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
