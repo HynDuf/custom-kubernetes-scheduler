@@ -197,6 +197,98 @@ Ensure the custom scheduler pod is running in the `kube-system` namespace and yo
     ```
     Check the custom scheduler logs. You should see entries related to filtering and scoring nodes for this Nginx pod. The pod should be placed on the node that the custom scheduler determined to have the best score based on available memory, CPU, and affinity (if any).
 
+### Testing Node Selector
+1. **Label nodes:**
+   Assign group for each node to test node selector. For instance:
+   ```sh
+   kubectl label node {NODE_NAME_1} group=red
+   kubectl label node {NODE_NAME_2} group=white
+   kubectl label node {NODE_NAME_3} group=royal-blue
+   ```
+2. **Deploy pods with different group requiremts**
+   Three files `scheduler/deployments/pod-node-selector-1.yaml`, `scheduler/deployments/pod-node-selector-2.yaml`, `scheduler/deployments/pod-node-selector-3.yaml` specify pods with group requirements
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: pod-node-selector-1
+     labels:
+       app: nginx-ns-3
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: nginx-ns-3
+     template:
+       metadata:
+         labels:
+           app: nginx-ns-3
+       spec:
+         schedulerName: custom-scheduler
+         nodeSelector:
+           group: red
+         containers:
+           - name: nginx
+             image: nginx:stable-alpine
+             ports:
+               - containerPort: 80
+                 name: http
+   ```
+Deploy these pods:
+    ```sh
+    kubectl apply -f scheduler/deployments/pod-node-selector-1.yaml
+    kubectl apply -f scheduler/deployments/pod-node-selector-2.yaml
+    kubectl apply -f scheduler/deployments/pod-node-selector-3.yaml
+    kubectl get pods -o wide
+    ```
+### Testing Taints/Tolerations
+1. Add tains for nodes
+
+```sh
+kubectl taint nodes {NODE_NAME_1} key1=value1:NoSchedule
+kubectl taint nodes {NODE_NAME_2} key2=value2:NoSchedule
+kubectl taint nodes {NODE_NAME_3} key3=value3:NoSchedule
+```
+
+2. Deploy three deployments with suitable tolerations
+Three files `scheduler/deployments/pod-toleration-1.yaml`, `scheduler/deployments/pod-node-toleration-2.yaml`, `scheduler/deployments/pod-node-toleration-3.yaml` specify pods
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-toleration-1
+  labels:
+    app: nginx-taint-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-taint-1
+  template:
+    metadata:
+      labels:
+        app: nginx-taint-1
+    spec:
+      schedulerName: custom-scheduler
+      tolerations:
+        - key: "key1"
+          operator: "Equal"
+          value: "value1"
+          effect: "NoSchedule"
+      containers:
+        - name: nginx
+          image: nginx:stable-alpine
+          ports:
+            - containerPort: 80
+              name: http
+```
+Deploy these pods:
+```sh
+kubectl apply -f scheduler/deployments/pod-node-selector-1.yaml
+kubectl apply -f scheduler/deployments/pod-node-selector-2.yaml
+kubectl apply -f scheduler/deployments/pod-node-selector-3.yaml
+kubectl get pods -o wide
+```
 ### Testing Node Affinity
 
 1.  **Label your nodes:**
@@ -211,8 +303,7 @@ Ensure the custom scheduler pod is running in the `kube-system` namespace and yo
     kubectl label node {NODE_NAME_2} zone=b --overwrite
     # Add more labels as needed
     ```
-
-2.  **Deploy a pod with preferred node affinity:**
+3.  **Deploy a pod with preferred node affinity:**
     The `scheduler/deployments/pod-preferred-affinity.yaml` defines a pod that prefers nodes with `zone=a` (higher weight) and `zone=b` (lower weight).
 
     ```yaml
