@@ -251,7 +251,7 @@ kubectl taint nodes {NODE_NAME_3} key3=value3:NoSchedule
 ```
 
 2. Deploy three deployments with suitable tolerations
-Three files `scheduler/deployments/pod-toleration-1.yaml`, `scheduler/deployments/pod-node-toleration-2.yaml`, `scheduler/deployments/pod-node-toleration-3.yaml` specify pods
+Three files `scheduler/deployments/pod-toleration-1.yaml`, `scheduler/deployments/pod-toleration-2.yaml`, `scheduler/deployments/pod-toleration-3.yaml` specify pods
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -284,9 +284,9 @@ spec:
 ```
 Deploy these pods:
 ```sh
-kubectl apply -f scheduler/deployments/pod-node-selector-1.yaml
-kubectl apply -f scheduler/deployments/pod-node-selector-2.yaml
-kubectl apply -f scheduler/deployments/pod-node-selector-3.yaml
+kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
+kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
+kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
 kubectl get pods -o wide
 ```
 ### Testing Node Affinity
