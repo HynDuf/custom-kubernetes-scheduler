@@ -285,8 +285,8 @@ spec:
 Deploy these pods:
 ```sh
 kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
-kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
-kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
+kubectl apply -f scheduler/deployments/pod-toleration-2.yaml
+kubectl apply -f scheduler/deployments/pod-toleration-3.yaml
 kubectl get pods -o wide
 ```
 ### Testing Node Affinity
