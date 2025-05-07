@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: pod-node-selector-3
+     labels:
+       app: nginx-ns-3
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: nginx-ns-3
+     template:
+       metadata:
+         labels:
+           app: nginx-ns-3
+       spec:
+         schedulerName: custom-scheduler
+         nodeSelector:
+           group: royal-blue
+         containers:
+           - name: nginx
+             image: nginx:stable-alpine
+             ports:
+               - containerPort: 80
+                 name: http
