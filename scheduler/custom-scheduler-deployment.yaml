@@ -25,9 +25,9 @@ spec:
         env:
           # --- Configurable Scoring Weights ---
           - name: SCORE_WEIGHT_MEM
-            value: "0.5" # Default weight for available memory (0.0 to 1.0+)
+            value: "0.6" # Default weight for available memory (0.0 to 1.0+)
           - name: SCORE_WEIGHT_CPU
-            value: "0.5" # Default weight for available CPU (idle cores) (0.0 to 1.0+)
+            value: "0.4" # Default weight for available CPU (idle cores) (0.0 to 1.0+)
           - name: SCORE_WEIGHT_AFFINITY
             value: "1.0" # Default weight for affinity score (adjust multiplier)
           # --- Get Pod Name for Event Reporting ---
