@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-toleration-1
+  labels:
+    app: nginx-taint-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-taint-1
+  template:
+    metadata:
+      labels:
+        app: nginx-taint-1
+    spec:
+      schedulerName: custom-scheduler
+      tolerations:
+        - key: "key1"
+          operator: "Equal"
+          value: "value1"
+          effect: "NoSchedule"
+      containers:
+        - name: nginx
+          image: nginx:stable-alpine
+          ports:
+            - containerPort: 80
+              name: http
