@@ -1,5 +1,30 @@
 # Custom Kubernetes Scheduler
 
+## Table of Contents
+
+1.  [Project Goal](#project-goal)
+2.  [Features](#features)
+3.  [How it Works](#how-it-works)
+4.  [Tech Stack](#tech-stack)
+5.  [Prerequisites](#prerequisites)
+6.  [Setup and Deployment](#setup-and-deployment)
+    1.  [1. Clone the Repository](#clone-the-repository)
+    2.  [2. Configure GKE and Build/Push Scheduler Image](#configure-gke-and-build-and-push-scheduler-image)
+    3.  [3. Deploy Monitoring Stack (Prometheus & Node Exporter)](#deploy-monitoring-stack)
+    4.  [4. Access Prometheus UI (Optional)](#access-prometheus-ui)
+    5.  [5. Deploy the Custom Scheduler](#deploy-the-custom-scheduler)
+7.  [Configuration](#configuration)
+    1.  [Scheduler Name](#scheduler-name)
+    2.  [Scoring Weights](#scoring-weights)
+8.  [Usage and Testing](#usage-and-testing)
+    1.  [Example Scenario](#example-scenario)
+    2.  [Testing Node Selector](#testing-node-selector)
+    3.  [Testing Taints/Tolerations](#testing-taintstolerations)
+    4.  [Testing Node Affinity](#testing-node-affinity)
+9.  [Local Development (Alternative to full GKE deployment)](#local-development-alternative-to-full-gke-deployment)
+10. [Cleanup](#cleanup)
+11. [Directory Structure](#directory-structure)
+12. [References](#references)
 ## Project Goal
 
 This project implements a custom Kubernetes scheduler designed to optimize pod placement based on a combination of real-time node metrics and pod scheduling preferences. Unlike the default Kubernetes scheduler, which primarily considers resource *requests*, this custom scheduler makes decisions based on:
@@ -59,14 +84,14 @@ This approach aims to distribute pods more effectively based on actual resource 
 
 These instructions primarily focus on deploying to **Google Kubernetes Engine (GKE)** but can be adapted for other clusters.
 
-### 1. Clone the Repository
+### Clone the Repository
 
 ```sh
 git clone https://github.com/HynDuf/custom-kubernetes-scheduler.git # Or your fork
 cd custom-kubernetes-scheduler
 ```
 
-### 2. Configure GKE (if applicable) and Build/Push Scheduler Image
+### Configure GKE and Build and Push Scheduler Image
 
 ```sh
 # For GKE Users
@@ -89,7 +114,7 @@ cd ..
 ```
 *After editing, save `scheduler/custom-scheduler-deployment.yaml`.*
 
-### 3. Deploy Monitoring Stack (Prometheus & Node Exporter)
+### Deploy Monitoring Stack
 
 ```sh
 # Create 'monitoring' namespace
@@ -109,7 +134,7 @@ kubectl get pods -o wide -n monitoring
 # You should see one node-exporter pod per node, and one prometheus-deployment pod.
 ```
 
-### 4. Access Prometheus UI (Optional)
+### Access Prometheus UI
 
 ```sh
 # Forward Prometheus service port to your local machine
@@ -120,7 +145,7 @@ kubectl port-forward svc/prometheus-service 9090:8080 -n monitoring
 # - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))
 ```
 
-### 5. Deploy the Custom Scheduler
+### Deploy the Custom Scheduler
 
 ```sh
 # Apply RBAC rules for the custom scheduler
