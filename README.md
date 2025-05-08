@@ -165,7 +165,7 @@ Modify these values in the deployment YAML and re-apply it to change the schedul
 
 Ensure the custom scheduler pod is running in the `kube-system` namespace and you are tailing its logs.
 
-### Example Scenario (based on old README test setup)
+### Example Scenario 
 
 1.  **Deploy resource-intensive pods to establish a baseline:**
     The `sleep.yaml` deployment requests significant memory, and `sysbench.yaml` can run a memory-intensive workload.
@@ -303,7 +303,7 @@ kubectl get pods -o wide
     kubectl label node {NODE_NAME_2} zone=b --overwrite
     # Add more labels as needed
     ```
-3.  **Deploy a pod with preferred node affinity:**
+2.  **Deploy a pod with preferred node affinity:**
     The `scheduler/deployments/pod-preferred-affinity.yaml` defines a pod that prefers nodes with `zone=a` (higher weight) and `zone=b` (lower weight).
 
     ```yaml
