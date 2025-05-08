@@ -17,15 +17,7 @@
     1.  [Scheduler Name](#scheduler-name)
     2.  [Scoring Weights](#scoring-weights)
 8.  [Usage and Demonstration](#usage-and-demonstration)
-    1.  [Prerequisites](#prerequisites)
-    2.  [Step 1: Configure GKE and Clone Repository](#step-1-configure-gke-and-clone-repository)
-    3.  [Step 2: Build and Push Custom Scheduler Docker Image](#step-2-build-and-push-custom-scheduler-docker-image)
-    4.  [Step 3: Update Scheduler Deployment Manifest](#step-3-update-scheduler-deployment-manifest)
-    5.  [Step 4: Deploy Monitoring Components (Prometheus & Node Exporter)](#step-4-deploy-monitoring-components-prometheus-and-node-exporter)
-    6.  [Step 5: Access Prometheus UI](#step-5-access-prometheus-ui)
-    7.  [Step 6: Deploy the Custom Scheduler](#step-6-deploy-the-custom-scheduler)
-    8.  [Step 7: Watch Custom Scheduler Logs](#step-7-watch-custom-scheduler-logs)
-    9.  [Demo Scenarios](#demo-scenarios)
+    1.  [Demo Scenarios](#demo-scenarios)
         1.  [Demo 1: Resource-Aware Scheduling](#demo-1-resource-aware-scheduling)
         2.  [Demo 2: Node Selector](#demo-2-node-selector)
         3.  [Demo 3: Taints and Tolerations](#demo-3-taints-and-tolerations)
@@ -194,141 +186,7 @@ The scoring behavior of the scheduler can be tuned using environment variables i
 
 Modify these values in the deployment YAML and re-apply it to change the scheduler's behavior.
 
-Okay, I've revised your "Usage and Testing" section to align with your new DEMO plan. I've focused on making it a step-by-step guide for the demonstration, incorporating the GKE setup and the specific demo scenarios. I've also retained the valuable "Local Development" and comprehensive "Cleanup" sections from your old README.
-
-Here's the updated section:
-
-```markdown
 ## Usage and Demonstration
-
-This section guides you through deploying the custom scheduler and its monitoring components on a Google Kubernetes Engine (GKE) cluster, followed by demonstrations of its key features.
-
-**Prerequisites:**
-
-*   A Google Kubernetes Engine (GKE) cluster is created.
-*   `gcloud` CLI is installed and configured.
-*   `kubectl` is installed and configured to communicate with your GKE cluster.
-*   Docker is installed and running.
-
-### Step 1: Configure GKE and Clone Repository
-
-1.  **Configure `gcloud` and get cluster credentials:**
-    Replace `[YOUR_PROJECT_ID]`, `[YOUR_CLUSTER_NAME]`, and `[YOUR_COMPUTE_ZONE]` with your actual values.
-    ```sh
-    gcloud config set project [YOUR_PROJECT_ID]
-    gcloud container clusters get-credentials [YOUR_CLUSTER_NAME] --zone [YOUR_COMPUTE_ZONE]
-    ```
-
-2.  **Clone the custom scheduler repository:**
-    ```sh
-    git clone https://github.com/HynDuf/custom-kubernetes-scheduler.git
-    cd custom-kubernetes-scheduler
-    ```
-
-### Step 2: Build and Push Custom Scheduler Docker Image
-
-1.  **Navigate to the scheduler directory:**
-    ```sh
-    cd scheduler
-    ```
-
-2.  **Build and push the Docker image to Google Container Registry (GCR):**
-    This command captures your Project ID from your `gcloud` configuration.
-    ```sh
-    PROJECT_ID=$(gcloud config get-value project)
-    docker build -t "gcr.io/${PROJECT_ID}/custom-scheduler:v1" .
-    ```
-
-3.  **Authenticate Docker with GCR and push the image:**
-    ```sh
-    gcloud auth configure-docker gcr.io --quiet
-    docker push "gcr.io/${PROJECT_ID}/custom-scheduler:v1"
-    ```
-
-4.  **Return to the project root:**
-    ```sh
-    cd ..
-    ```
-
-### Step 3: Update Scheduler Deployment Manifest
-
-**IMPORTANT:** You MUST manually edit the scheduler's deployment manifest to use the image you just pushed.
-
-1.  Open the file: `scheduler/custom-scheduler-deployment.yaml`
-2.  Find the `image` field under the container spec ( `spec.template.spec.containers[0].image`).
-3.  Update it to: `image: gcr.io/[YOUR_PROJECT_ID]/custom-scheduler:v1`
-    (Replace `[YOUR_PROJECT_ID]` with your actual Project ID).
-
-### Step 4: Deploy Monitoring Components (Prometheus & Node Exporter)
-
-1.  **Create a dedicated namespace for monitoring components:**
-    ```sh
-    kubectl create namespace monitoring
-    ```
-
-2.  **Deploy Node Exporter:**
-    This collects hardware and OS metrics from each node.
-    ```sh
-    kubectl apply -f node-exporter/node-exporter-daemonset.yml
-    ```
-
-3.  **Deploy Prometheus:**
-    This includes RBAC, ConfigMap, Deployment, and Service for Prometheus.
-    ```sh
-    kubectl apply -f prometheus/clusterRole.yaml
-    kubectl apply -f prometheus/config-map.yaml -n monitoring
-    kubectl apply -f prometheus/prometheus-deployment.yaml -n monitoring
-    kubectl apply -f prometheus/prometheus-service.yaml -n monitoring
-    ```
-
-4.  **Verify monitoring components are running:**
-    ```sh
-    kubectl get pods -o wide -n monitoring
-    ```
-    You should see one `node-exporter-*` pod per node and one `prometheus-deployment-*` pod in the `monitoring` namespace, all in a `Running` state.
-
-### Step 5: Access Prometheus UI
-
-1.  **Forward the Prometheus service port to your local machine:**
-    This command will run in the background. Note its PID if you want to kill it later (e.g., `ps aux | grep "kubectl port-forward svc/prometheus-service"` then `kill [PID]`).
-    ```sh
-    kubectl port-forward svc/prometheus-service 9090:8080 -n monitoring &
-    ```
-
-2.  **Access the Prometheus UI in your browser:**
-    Open [http://localhost:9090](http://localhost:9090)
-    You can test queries like:
-    *   `node_memory_MemAvailable_bytes`
-    *   `avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m]))`
-
-### Step 6: Deploy the Custom Scheduler
-
-1.  **Apply RBAC rules for the custom scheduler:**
-    ```sh
-    kubectl apply -f scheduler/scheduler-rbac.yaml
-    ```
-
-2.  **Deploy the custom scheduler:**
-    Ensure you've updated the image name in `scheduler/custom-scheduler-deployment.yaml` as per Step 3.
-    ```sh
-    kubectl apply -f scheduler/custom-scheduler-deployment.yaml
-    ```
-
-3.  **Verify the custom scheduler pod is running:**
-    It runs in the `kube-system` namespace.
-    ```sh
-    kubectl get pods -n kube-system -l app=custom-scheduler
-    ```
-
-### Step 7: Watch Custom Scheduler Logs
-
-Tail the logs of the custom scheduler pod to observe its decision-making process during the demos.
-```sh
-kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
-```
-Keep this terminal window open or open a new one for observing logs.
-
----
 
 ### Demo Scenarios
 
@@ -371,7 +229,7 @@ This demo highlights how the custom scheduler considers actual resource usage (v
     ```
     Check pod placement. The default scheduler will likely place this pod based on resource *requests*, potentially choosing the node already stressed by `sysbench` if its *requested* resources seem low.
     ```sh
-    kubectl get pods -o wide -l app=nginx-default
+    kubectl get pods -o wide 
     ```
 
 5.  **Deploy a test pod using the Custom Scheduler:**
@@ -381,8 +239,9 @@ This demo highlights how the custom scheduler considers actual resource usage (v
     ```
     Check the custom scheduler logs. The pod should be placed on a node that the custom scheduler determined to have better actual resource availability (likely the node running the `sleep` pod or another less loaded node).
     ```sh
-    kubectl get pods -o wide -l app=nginx-custom
-    # Observe the custom scheduler logs from Step 7
+    kubectl get pods -o wide
+    # Observe the custom scheduler logs 
+    kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
     ```
 
 6.  **Cleanup Demo 1:**
@@ -415,7 +274,8 @@ This demo shows how the custom scheduler respects `nodeSelector` constraints.
     The pod should be scheduled on the node you labeled `group=red`. Observe the custom scheduler logs for filtering steps.
     ```sh
     kubectl get pods -o wide -l app=nginx-ns-1 # Assuming the pod has a label app=nginx-ns-1 or similar. Update if needed based on pod-node-selector-1.yaml
-    # Observe the custom scheduler logs from Step 7
+    # Observe the custom scheduler logs 
+    kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
     ```
 
 4.  **Cleanup Demo 2:**
@@ -445,7 +305,8 @@ This demo shows how the custom scheduler handles taints on nodes and tolerations
     The pod should be scheduled on `[CHOSEN_NODE_1_FOR_TAINT]` (if resources allow) or any other untainted, eligible node. It should *not* be scheduled on `[CHOSEN_NODE_2_FOR_TAINT]` because it doesn't tolerate `key2=value2`. Observe the custom scheduler logs.
     ```sh
     kubectl get pods -o wide -l app=nginx-taint-1 # Assuming the pod has a label app=nginx-taint-1 or similar. Update if needed.
-    # Observe the custom scheduler logs from Step 7
+    # Observe the custom scheduler logs 
+    kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
     ```
 
 4.  **Cleanup Demo 3:**
@@ -496,7 +357,8 @@ This demo illustrates `preferredDuringSchedulingIgnoredDuringExecution` node aff
     The pod should ideally be scheduled on the node labeled `zone=a` if compatible and available, or `zone=b` otherwise, considering other scoring factors. Check the custom scheduler logs to see how affinity scores influenced the decision.
     ```sh
     kubectl get pods -o wide -l app=nginx-preferred-affinity # Assuming the pod has a label app=nginx-preferred-affinity or similar. Update if needed.
-    # Observe the custom scheduler logs from Step 7
+    # Observe the custom scheduler logs 
+    kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
     ```
 
 4.  **Cleanup Demo 4:**
@@ -600,6 +462,7 @@ gcloud container images delete "gcr.io/${PROJECT_ID}/custom-scheduler:v1" --forc
 │   ├── example.yaml
 │   ├── prometheus-deployment.yaml
 │   └── prometheus-service.yaml
+├── DEMO.md
 ├── README.md                               --> This file
 └── scheduler
     ├── custom-scheduler
@@ -628,7 +491,7 @@ gcloud container images delete "gcr.io/${PROJECT_ID}/custom-scheduler:v1" --forc
     ├── scoring.go
     └── types.go
 
-5 directories, 32 files
+5 directories, 33 files
 ```
 
 ## References
