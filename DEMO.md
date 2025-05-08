@@ -114,7 +114,7 @@ kubectl label node [CHOSEN_NODE_FOR_LABEL] group=red --overwrite
 # Deploy a pod that uses a nodeSelector to target the labeled node:
 kubectl apply -f scheduler/deployments/pod-node-selector-1.yaml
 # Check pod placement and custom scheduler logs:
-kubectl get pods -o wide -l app=pod-node-selector-1
+kubectl get pods -o wide
 kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
 
 # Clean up
@@ -130,7 +130,7 @@ kubectl taint nodes [CHOSEN_NODE_2_FOR_TAINT] key2=value2:NoSchedule --overwrite
 # [CHOSEN_NODE_2_FOR_TAINT] will not pass the predicate check because the pod doesn't tolerate its taint.
 kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
 # Check pod placement and custom scheduler logs:
-kubectl get pods -o wide -l app=pod-toleration-1
+kubectl get pods -o wide
 kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
 
 # Clean up taints
@@ -147,7 +147,7 @@ kubectl label node [CHOSEN_NODE_2_FOR_AFFINITY_LABEL] zone=b
 # affinity for nodes with label 'zone=a' (weight: 80) or 'zone=b' (weight: 20).
 kubectl apply -f scheduler/deployments/pod-preferred-affinity.yaml
 # Check pod placement and custom scheduler logs:
-kubectl get pods -o wide -l app=pod-preferred-affinity
+kubectl get pods -o wide
 kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
 
 # Clean up labels
