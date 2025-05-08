@@ -231,6 +231,7 @@ Ensure the custom scheduler pod is running in the `kube-system` namespace and yo
    kubectl label node {NODE_NAME_3} group=royal-blue
    ```
 2. **Deploy pods with different group requiremts**
+
    Three files `scheduler/deployments/pod-node-selector-1.yaml`, `scheduler/deployments/pod-node-selector-2.yaml`, `scheduler/deployments/pod-node-selector-3.yaml` specify pods with group requirements
    ```yaml
    apiVersion: apps/v1
@@ -259,61 +260,65 @@ Ensure the custom scheduler pod is running in the `kube-system` namespace and yo
                - containerPort: 80
                  name: http
    ```
-Deploy these pods:
+
+    Deploy these pods:
+
     ```sh
     kubectl apply -f scheduler/deployments/pod-node-selector-1.yaml
     kubectl apply -f scheduler/deployments/pod-node-selector-2.yaml
     kubectl apply -f scheduler/deployments/pod-node-selector-3.yaml
     kubectl get pods -o wide
     ```
+
 ### Testing Taints/Tolerations
 1. Add tains for nodes
 
-```sh
-kubectl taint nodes {NODE_NAME_1} key1=value1:NoSchedule
-kubectl taint nodes {NODE_NAME_2} key2=value2:NoSchedule
-kubectl taint nodes {NODE_NAME_3} key3=value3:NoSchedule
-```
+    ```sh
+    kubectl taint nodes {NODE_NAME_1} key1=value1:NoSchedule
+    kubectl taint nodes {NODE_NAME_2} key2=value2:NoSchedule
+    kubectl taint nodes {NODE_NAME_3} key3=value3:NoSchedule
+    ```
 
 2. Deploy three deployments with suitable tolerations
-Three files `scheduler/deployments/pod-toleration-1.yaml`, `scheduler/deployments/pod-toleration-2.yaml`, `scheduler/deployments/pod-toleration-3.yaml` specify pods
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: pod-toleration-1
-  labels:
-    app: nginx-taint-1
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nginx-taint-1
-  template:
+
+    Three files `scheduler/deployments/pod-toleration-1.yaml`, `scheduler/deployments/pod-toleration-2.yaml`, `scheduler/deployments/pod-toleration-3.yaml` specify pods
+    ```yaml
+    apiVersion: apps/v1
+    kind: Deployment
     metadata:
+      name: pod-toleration-1
       labels:
         app: nginx-taint-1
     spec:
-      schedulerName: custom-scheduler
-      tolerations:
-        - key: "key1"
-          operator: "Equal"
-          value: "value1"
-          effect: "NoSchedule"
-      containers:
-        - name: nginx
-          image: nginx:stable-alpine
-          ports:
-            - containerPort: 80
-              name: http
-```
-Deploy these pods:
-```sh
-kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
-kubectl apply -f scheduler/deployments/pod-toleration-2.yaml
-kubectl apply -f scheduler/deployments/pod-toleration-3.yaml
-kubectl get pods -o wide
-```
+      replicas: 1
+      selector:
+        matchLabels:
+          app: nginx-taint-1
+      template:
+        metadata:
+          labels:
+            app: nginx-taint-1
+        spec:
+          schedulerName: custom-scheduler
+          tolerations:
+            - key: "key1"
+              operator: "Equal"
+              value: "value1"
+              effect: "NoSchedule"
+          containers:
+            - name: nginx
+              image: nginx:stable-alpine
+              ports:
+                - containerPort: 80
+                  name: http
+    ```
+    Deploy these pods:
+    ```sh
+    kubectl apply -f scheduler/deployments/pod-toleration-1.yaml
+    kubectl apply -f scheduler/deployments/pod-toleration-2.yaml
+    kubectl apply -f scheduler/deployments/pod-toleration-3.yaml
+    kubectl get pods -o wide
+    ```
 ### Testing Node Affinity
 
 1.  **Label your nodes:**
@@ -391,7 +396,16 @@ To remove all components deployed by this project:
 
 ```sh
 # Delete sample deployments/pods
+kubectl delete -f scheduler/deployments/pod-node-selector-1 --ignore-not-found
+kubectl delete -f scheduler/deployments/pod-node-selector-2 --ignore-not-found
+kubectl delete -f scheduler/deployments/pod-node-selector-3 --ignore-not-found
+
+kubectl delete -f scheduler/deployments/pod-toleration-1 --ignore-not-found
+kubectl delete -f scheduler/deployments/pod-toleration-2 --ignore-not-found
+kubectl delete -f scheduler/deployments/pod-toleration-3 --ignore-not-found
+
 kubectl delete -f scheduler/deployments/pod-preferred-affinity.yaml --ignore-not-found
+
 kubectl delete -f scheduler/deployments/testcustom.yaml --ignore-not-found
 kubectl delete -f scheduler/deployments/testdefault.yaml --ignore-not-found
 kubectl delete -f scheduler/deployments/sysbench.yaml --ignore-not-found
