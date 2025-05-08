@@ -1,25 +1,25 @@
 apiVersion: apps/v1
-   kind: Deployment
+kind: Deployment
+metadata:
+ name: pod-node-selector-1
+ labels:
+   app: nginx-ns-1
+spec:
+ replicas: 1
+ selector:
+   matchLabels:
+     app: nginx-ns-1
+ template:
    metadata:
-     name: pod-node-selector-1
      labels:
        app: nginx-ns-1
    spec:
-     replicas: 1
-     selector:
-       matchLabels:
-         app: nginx-ns-1
-     template:
-       metadata:
-         labels:
-           app: nginx-ns-1
-       spec:
-         schedulerName: custom-scheduler
-         nodeSelector:
-           group: red
-         containers:
-           - name: nginx
-             image: nginx:stable-alpine
-             ports:
-               - containerPort: 80
-                 name: http
+     schedulerName: custom-scheduler
+     nodeSelector:
+       group: red
+     containers:
+       - name: nginx
+         image: nginx:stable-alpine
+         ports:
+           - containerPort: 80
+             name: http
