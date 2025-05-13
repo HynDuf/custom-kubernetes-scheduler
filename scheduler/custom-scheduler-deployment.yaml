@@ -16,6 +16,8 @@ spec:
       labels:
         app: custom-scheduler
     spec:
+      tolerations:
+        - operator: "Exists"
       serviceAccountName: custom-scheduler-sa # Match RBAC ServiceAccount name
       containers:
       - name: custom-scheduler

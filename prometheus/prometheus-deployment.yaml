@@ -19,6 +19,8 @@ spec:
         # prometheus.io/scrape: 'true'
         # prometheus.io/port: '9090'
     spec:
+      tolerations:
+        - operator: "Exists"
       serviceAccountName: prometheus-sa # <-- IMPORTANT: Use the dedicated Service Account created earlier
       containers:
         - name: prometheus

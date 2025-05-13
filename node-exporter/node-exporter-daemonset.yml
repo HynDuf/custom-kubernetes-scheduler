@@ -18,15 +18,8 @@ spec:
          prometheus.io/scrape: "true"
          prometheus.io/port: "9100"
     spec:
-      # Tolerations might be needed if your nodes have taints (e.g., control-plane nodes)
-      # Add tolerations if node-exporter isn't scheduling on all nodes:
-      # tolerations:
-      # - key: "node-role.kubernetes.io/control-plane"
-      #   operator: "Exists"
-      #   effect: "NoSchedule"
-      # - key: "node-role.kubernetes.io/master" # Older label for control-plane
-      #   operator: "Exists"
-      #   effect: "NoSchedule"
+      tolerations:
+        - operator: "Exists"
       hostPID: true
       hostIPC: true
       hostNetwork: true
