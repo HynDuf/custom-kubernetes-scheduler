@@ -1,31 +1,40 @@
-# pod-preferred-affinity.yaml
-apiVersion: v1
-kind: Pod
+# deployment-preferred-affinity.yaml
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: pod-preferred-affinity
+  name: deployment-preferred-affinity
 spec:
-  schedulerName: custom-scheduler
-  affinity:
-    nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 80 # High preference weight (will translate to ~8.0 score bonus)
-        preference:
-          matchExpressions:
-          - key: zone
-            operator: In
-            values:
-            - a # Prefer node in zone 'a'
-      - weight: 20
-        preference:
-          matchExpressions:
-          - key: zone
-            operator: In
-            values:
-            - b
-  containers:
-    - name: nginx
-      image: "nginx:stable-alpine"
-      resources:
-         requests:
-           cpu: "10m"
-           memory: "20Mi"
+  replicas: 1 # You want one instance of this pod
+  selector:
+    matchLabels:
+      app: nginx-preferred # This label connects the Deployment to its Pods
+  template: # This is where your Pod specification goes
+    metadata:
+      labels:
+        app: nginx-preferred # Pods created by this Deployment will have this label
+    spec:
+      schedulerName: custom-scheduler # IMPORTANT: Still tell K8s to use your scheduler
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 80
+            preference:
+              matchExpressions:
+              - key: zone
+                operator: In
+                values:
+                - a
+          - weight: 20
+            preference:
+              matchExpressions:
+              - key: zone
+                operator: In
+                values:
+                - b
+      containers:
+        - name: nginx
+          image: "nginx:stable-alpine"
+          resources:
+             requests:
+               cpu: "10m"
+               memory: "20Mi"
