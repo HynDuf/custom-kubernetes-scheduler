@@ -1,3 +1,25 @@
+# 1. DEMO NEW
+```sh
+cd custom-kubernetes-scheduler
+kubectl apply -f scheduler/custom-scheduler-deployment.yaml
+kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
+
+kubectl label node gke-cluster-2-default-pool-c5dfe2a2-kci2 zone=a
+kubectl label node gke-cluster-2-default-pool-c5dfe2a2-y0v6 zone=b
+kubectl apply -f scheduler/deployments/pod-preferred-affinity.yaml
+kubectl get pods -o wide
+kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
+
+vim scheduler/custom-scheduler-deployment.yaml
+kubectl apply -f scheduler/custom-scheduler-deployment.yaml
+
+kubectl taint nodes gke-cluster-2-default-pool-c5dfe2a2-kci2 key2=value2:NoExecute --overwrite
+kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
+
+kubectl delete -f scheduler/deployments/pod-preferred-affinity.yaml
+kubectl taint nodes gke-cluster-2-default-pool-c5dfe2a2-kci2 key2:NoExecute- 
+```
+# 2. DEMO OLD
 ```sh
 kubectl apply -f scheduler/custom-scheduler-deployment.yaml
 kubectl logs -n kube-system -l app=custom-scheduler -f --tail=100
